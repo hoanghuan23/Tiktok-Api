@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Source
 from app.schemas.sources import SourceCreate, SourceRead, SourceUpdate
+from app.services.tiktok_client import TikTokClient
 
 
 router = APIRouter(prefix="/sources", tags=["sources"])
@@ -24,14 +25,28 @@ def _source_url(source_type: str, identifier: str) -> str | None:
     return None
 
 
+def _source_identifier(source_type: str, identifier: str) -> str:
+    if source_type == "hashtag":
+        return identifier.lstrip("#")
+    if source_type == "user":
+        return identifier.lstrip("@")
+    return identifier
+
+
 @router.post("", response_model=SourceRead, status_code=status.HTTP_201_CREATED)
-def create_source(payload: SourceCreate, db: Session = Depends(get_db)) -> Source:
+async def create_source(payload: SourceCreate, db: Session = Depends(get_db)) -> Source:
     # TODO: DB chua co cot include_comments, tam thoi chi nhan request field nay.
+    identifier = _source_identifier(payload.source_type, payload.identifier)
+    follower_count = None
+    if payload.source_type == "user":
+        follower_count = await TikTokClient(db).get_user_follower_count(identifier)
+
     source = Source(
         source_type=payload.source_type,
-        identifier=payload.identifier.lstrip("#") if payload.source_type == "hashtag" else payload.identifier,
+        identifier=identifier,
         display_name=payload.display_name,
-        tiktok_url=_source_url(payload.source_type, payload.identifier),
+        tiktok_url=_source_url(payload.source_type, identifier),
+        follower_count=follower_count,
         is_active=True,
         max_days_old=payload.max_days_old,
         is_accessible=True,

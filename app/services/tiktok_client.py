@@ -2,7 +2,6 @@ from typing import Any
 
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
-from TikTokApi import TikTokApi
 
 from app.core.config import get_settings
 from app.models import TikTokSession
@@ -21,22 +20,26 @@ class TikTokClient:
             .first()
         )
 
-    def _get_ms_token(self) -> str:
+    def _get_ms_token(self) -> str | None:
         session = self.get_session_record()
         if session:
             return session.ms_token
         if self.settings.ms_token:
             return self.settings.ms_token
-        raise RuntimeError("Khong tim thay ms_token hop le trong DB hoac .env")
+        return None
 
-    async def _create_api(self) -> TikTokApi:
+    async def _create_api(self) -> Any:
+        from TikTokApi import TikTokApi
+
         ms_token = self._get_ms_token()
         api = TikTokApi()
-        await api.create_sessions(
-            num_sessions=1,
-            ms_tokens=[ms_token],
-            headless=self.settings.tiktok_headless,
-        )
+        session_kwargs = {
+            "num_sessions": 1,
+            "headless": self.settings.tiktok_headless,
+        }
+        if ms_token:
+            session_kwargs["ms_tokens"] = [ms_token]
+        await api.create_sessions(**session_kwargs)
         return api
 
     async def get_user_videos(self, username: str, max_count: int) -> list[Any]:
@@ -50,6 +53,17 @@ class TikTokClient:
             return videos
         finally:
             await api.close_sessions()
+
+    async def get_user_follower_count(self, username: str) -> int | None:
+        api = await self._create_api()
+        try:
+            info = await api.user(username=username).info()
+        finally:
+            await api.close_sessions()
+
+        stats = info.get("userInfo", {}).get("stats", {})
+        follower_count = stats.get("followerCount")
+        return int(follower_count) if follower_count is not None else None
 
     async def get_hashtag_videos(self, hashtag_name: str, max_count: int) -> list[Any]:
         api = await self._create_api()
