@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    database_url: str = "sqlite:///./tiktok.db"
+    database_url: str = "sqlite:///./data/tiktok.db"
     ms_token: str | None = None
     tiktok_headless: bool = True
 

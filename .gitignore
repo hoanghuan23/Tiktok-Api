@@ -74,3 +74,6 @@ htmlcov/
 *.bak
 *.tmp
 .cache/
+
+# file mau xu ly cac truong hop
+test_data/

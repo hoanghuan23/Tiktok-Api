@@ -16,3 +16,10 @@ class TikTokSession(Base):
     created_at = Column(DateTime)
 
     jobs = relationship("PipelineJob", back_populates="session")
+
+    @property
+    def masked_ms_token(self) -> str:
+        token = self.ms_token or ""
+        if len(token) <= 12:
+            return "****"
+        return f"{token[:6]}...{token[-6:]}"
