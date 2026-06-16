@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import desc
@@ -5,6 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import TikTokSession
+
+from datetime import datetime, timedelta, timezone
 
 
 class TikTokClient:
@@ -42,11 +45,47 @@ class TikTokClient:
         await api.create_sessions(**session_kwargs)
         return api
 
-    async def get_user_videos(self, username: str, max_count: int) -> list[Any]:
+    @staticmethod
+    def _comparable_datetime(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    @classmethod
+    def video_create_time(cls, video: Any) -> datetime | None:
+        data = getattr(video, "as_dict", {}) or {}
+        raw = data.get("createTime") or data.get("create_time")
+
+        if raw is not None:
+            try:
+                timestamp = float(raw)
+                if timestamp > 9_999_999_999:
+                    timestamp /= 1000
+                return datetime.fromtimestamp(timestamp, timezone.utc).replace(tzinfo=None)
+            except (TypeError, ValueError):
+                pass
+        create_time = getattr(video, "create_time", None)
+        if isinstance(create_time, datetime):
+            return cls._comparable_datetime(create_time)
+        
+        return None
+
+    async def get_user_videos(
+        self,
+        username: str,
+        max_count: int,
+        since: datetime | None = None,
+    ) -> list[Any]:
         api = await self._create_api()
         try:
             videos = []
+            cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
             async for video in api.user(username=username).videos(count=max_count):
+                create_time = self.video_create_time(video)
+                if cutoff_time and create_time:
+                    if create_time < cutoff_time:
+                        break
+
                 videos.append(video)
                 if len(videos) >= max_count:
                     break

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -9,6 +9,10 @@ from app.services.tiktok_client import TikTokClient
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _user_video_cutoff() -> datetime:
+    return _now() - timedelta(hours=24)
 
 
 def _get_nested(data: dict[str, Any], *keys: str) -> Any:
@@ -29,29 +33,38 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _video_id(video: Any, data: dict[str, Any] | None = None) -> str | None:
+    if data is None:
+        data = getattr(video, "as_dict", {}) or {}
+    video_id = getattr(video, "id", None) or data.get("id")
+    return str(video_id) if video_id else None
+
+
 def _video_url(video: Any, data: dict[str, Any]) -> str:
     if data.get("webVideoUrl"):
         return data["webVideoUrl"]
     author = data.get("author")
     username = author if isinstance(author, str) else _get_nested(data, "author", "uniqueId")
-    if username and getattr(video, "id", None):
-        return f"https://www.tiktok.com/@{username}/video/{video.id}"
-    if getattr(video, "id", None):
-        return f"https://www.tiktok.com/video/{video.id}"
+    video_id = _video_id(video, data)
+    if username and video_id:
+        return f"https://www.tiktok.com/@{username}/video/{video_id}"
+    if video_id:
+        return f"https://www.tiktok.com/video/{video_id}"
     raise ValueError("Video khong co id hop le")
 
 
 def _video_to_post(source_id: int, video: Any) -> Post:
     data = getattr(video, "as_dict", {}) or {}
     video_data = data.get("video") or {}
+    create_time = TikTokClient.video_create_time(video)
     return Post(
         source_id=source_id,
-        tiktok_video_id=str(getattr(video, "id", data.get("id"))),
+        tiktok_video_id=_video_id(video, data),
         tiktok_url=_video_url(video, data),
         description=data.get("desc"),
         duration_seconds=_to_int(video_data.get("duration")),
         cover_url=video_data.get("cover") or video_data.get("originCover"),
-        posted_at=getattr(video, "create_time", None) or _now(),
+        posted_at=create_time or _now(),
         created_at=_now(),
         is_tracked=True,
         is_deleted=False,
@@ -98,7 +111,11 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
 
     try:
         if source.source_type == "user":
-            videos = await client.get_user_videos(source.identifier, max_count)
+            videos = await client.get_user_videos(
+                source.identifier,
+                max_count,
+                since=_user_video_cutoff(),
+            )
         elif source.source_type == "hashtag":
             videos = await client.get_hashtag_videos(source.identifier, max_count)
         else:
@@ -107,7 +124,7 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
 
         posts_new = 0
         for video in videos:
-            tiktok_video_id = str(getattr(video, "id", None))
+            tiktok_video_id = _video_id(video)
             if not tiktok_video_id:
                 job.items_failed += 1
                 continue
