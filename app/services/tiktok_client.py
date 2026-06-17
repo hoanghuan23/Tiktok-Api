@@ -39,6 +39,8 @@ class TikTokClient:
         session_kwargs = {
             "num_sessions": 1,
             "headless": self.settings.tiktok_headless,
+            "browser": self.settings.tiktok_browser,
+            "sleep_after": self.settings.tiktok_sleep_after,
         }
         if ms_token:
             session_kwargs["ms_tokens"] = [ms_token]

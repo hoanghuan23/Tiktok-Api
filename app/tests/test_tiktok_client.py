@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+import sys
 
 import pytest
 
@@ -84,3 +85,33 @@ async def test_get_user_videos_uses_create_time_from_as_dict_when_attribute_is_m
     recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=now - timedelta(hours=24))
 
     assert [video.id for video in recent_videos] == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_create_api_passes_configured_session_options(monkeypatch):
+    created_kwargs = {}
+
+    class FakeTikTokApi:
+        async def create_sessions(self, **kwargs):
+            created_kwargs.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "TikTokApi", SimpleNamespace(TikTokApi=FakeTikTokApi))
+
+    client = TikTokClient(db=None)
+    client.settings = SimpleNamespace(
+        ms_token="token-123",
+        tiktok_headless=False,
+        tiktok_browser="chromium",
+        tiktok_sleep_after=5,
+    )
+    client.get_session_record = lambda: None
+
+    await client._create_api()
+
+    assert created_kwargs == {
+        "num_sessions": 1,
+        "headless": False,
+        "browser": "chromium",
+        "sleep_after": 5,
+        "ms_tokens": ["token-123"],
+    }
