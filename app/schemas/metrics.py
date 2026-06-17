@@ -10,5 +10,6 @@ class PostMetricRead(ORMBase):
     shares_count: int | None = None
     comments_count: int | None = None
     views_count: int | None = None
+    bookmarks_count: int | None = None
     recorded_at: datetime | None = None
     job_id: int | None = None

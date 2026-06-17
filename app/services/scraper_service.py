@@ -3,7 +3,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import PipelineJob, PipelineLog, Post, Source
+from app.models import PipelineJob, PipelineLog, Post, PostMetric, Source
 from app.services.tiktok_client import TikTokClient
 
 
@@ -40,6 +40,13 @@ def _video_id(video: Any, data: dict[str, Any] | None = None) -> str | None:
     return str(video_id) if video_id else None
 
 
+def _video_stats(video: Any, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    if data is None:
+        data = getattr(video, "as_dict", {}) or {}
+    stats = data.get("statsV2") or data.get("stats") or getattr(video, "stats", None)
+    return stats if isinstance(stats, dict) else {}
+
+
 def _video_url(video: Any, data: dict[str, Any]) -> str:
     if data.get("webVideoUrl"):
         return data["webVideoUrl"]
@@ -71,6 +78,23 @@ def _video_to_post(source_id: int, video: Any) -> Post:
         metric_tier="bootstrap",
         cold_check_count=0,
         metric_scan_miss_count=0,
+    )
+
+
+def _video_to_metric(post: Post, video: Any, job_id: int, recorded_at: datetime) -> PostMetric | None:
+    data = getattr(video, "as_dict", {}) or {}
+    stats = _video_stats(video, data)
+    if not stats:
+        return None
+    return PostMetric(
+        post_id=post.id,
+        likes_count=_to_int(stats.get("diggCount")),
+        shares_count=_to_int(stats.get("shareCount")),
+        comments_count=_to_int(stats.get("commentCount")),
+        views_count=_to_int(stats.get("playCount")),
+        bookmarks_count=_to_int(stats.get("collectCount")),
+        recorded_at=recorded_at,
+        job_id=job_id,
     )
 
 
@@ -133,7 +157,15 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
             if exists:
                 continue
 
-            db.add(_video_to_post(source.id, video))
+            post = _video_to_post(source.id, video)
+            db.add(post)
+            db.flush()
+
+            recorded_at = _now()
+            metric = _video_to_metric(post, video, job.id, recorded_at)
+            if metric:
+                db.add(metric)
+                post.last_metric_update = recorded_at
             posts_new += 1
 
         job.posts_found = len(videos)

@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
-from app.models import Post, Source
+from app.models import Post, PostMetric, Source
 from app.services import scraper_service
 from app.services.scraper_service import crawl_source
 from app.services.tiktok_client import TikTokClient
@@ -98,3 +98,44 @@ def test_crawl_source_saves_posted_at_from_video_as_dict_create_time(monkeypatch
     assert job.status == "done"
     assert post.posted_at == expected_posted_at
     assert post.tiktok_url == "https://www.tiktok.com/@vtv24news/video/video-1"
+
+
+def test_crawl_source_creates_initial_post_metric_from_video_stats(monkeypatch):
+    video = SimpleNamespace(
+        id="video-1",
+        as_dict={
+            "id": "video-1",
+            "createTime": 1767351600,
+            "author": {"uniqueId": "vtv24news"},
+            "statsV2": {
+                "diggCount": "1187",
+                "shareCount": "49",
+                "commentCount": "35",
+                "playCount": "45200",
+                "collectCount": "242",
+            },
+        },
+    )
+
+    async def fake_get_user_videos(self, username, max_count, since=None):
+        return [video]
+
+    monkeypatch.setattr(TikTokClient, "get_user_videos", fake_get_user_videos)
+    db = _session()
+    source = Source(source_type="user", identifier="vtv24news", is_active=True)
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    job = asyncio.run(crawl_source(db, source, max_count=30))
+    post = db.query(Post).filter(Post.tiktok_video_id == "video-1").one()
+    metric = db.query(PostMetric).filter(PostMetric.post_id == post.id).one()
+
+    assert job.status == "done"
+    assert metric.likes_count == 1187
+    assert metric.shares_count == 49
+    assert metric.comments_count == 35
+    assert metric.views_count == 45200
+    assert metric.bookmarks_count == 242
+    assert metric.job_id == job.id
+    assert post.last_metric_update == metric.recorded_at

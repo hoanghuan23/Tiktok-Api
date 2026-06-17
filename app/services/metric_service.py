@@ -51,6 +51,7 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
                 shares_count=_to_int(stats.get("shareCount")),
                 comments_count=_to_int(stats.get("commentCount")),
                 views_count=_to_int(stats.get("playCount")),
+                bookmarks_count=_to_int(stats.get("collectCount")),
                 recorded_at=recorded_at,
                 job_id=job.id,
             )

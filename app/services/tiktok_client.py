@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import desc
@@ -7,10 +7,10 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.models import TikTokSession
 
-from datetime import datetime, timedelta, timezone
-
 
 class TikTokClient:
+    MAX_CONSECUTIVE_OLD_USER_VIDEOS = 5
+
     def __init__(self, db: Session):
         self.db = db
         self.settings = get_settings()
@@ -72,6 +72,11 @@ class TikTokClient:
         
         return None
 
+    @staticmethod
+    def video_is_pinned(video: Any) -> bool:
+        data = getattr(video, "as_dict", {}) or {}
+        return bool(data.get("isPinnedPost") or data.get("isPinned"))
+
     async def get_user_videos(
         self,
         username: str,
@@ -81,12 +86,25 @@ class TikTokClient:
         api = await self._create_api()
         try:
             videos = []
-            cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
+            cutoff_time = (
+                self._comparable_datetime(since)
+                if since is not None
+                else (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
+            )
+            consecutive_old = 0
             async for video in api.user(username=username).videos(count=max_count):
                 create_time = self.video_create_time(video)
                 if cutoff_time and create_time:
                     if create_time < cutoff_time:
-                        break
+                        if self.video_is_pinned(video):
+                            continue
+
+                        consecutive_old += 1
+                        if consecutive_old >= self.MAX_CONSECUTIVE_OLD_USER_VIDEOS:
+                            break
+                        continue
+
+                consecutive_old = 0
 
                 videos.append(video)
                 if len(videos) >= max_count:

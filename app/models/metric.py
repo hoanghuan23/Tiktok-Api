@@ -13,6 +13,7 @@ class PostMetric(Base):
     shares_count = Column(Integer)
     comments_count = Column(Integer)
     views_count = Column(Integer)
+    bookmarks_count = Column(Integer)
     recorded_at = Column(DateTime)
     job_id = Column(Integer, ForeignKey("pipeline_jobs.id", ondelete="SET NULL"))
 
