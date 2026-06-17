@@ -29,3 +29,4 @@ class Post(Base):
     source = relationship("Source", back_populates="posts")
     metrics = relationship("PostMetric", back_populates="post", order_by="PostMetric.recorded_at")
     comments = relationship("Comment", back_populates="post")
+    hashtags = relationship("Hashtag", secondary="post_hashtags", back_populates="posts")

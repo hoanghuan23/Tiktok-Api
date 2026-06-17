@@ -1,10 +1,14 @@
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import PipelineJob, PipelineLog, Post, PostMetric, Source
+from app.models import Hashtag, PipelineJob, PipelineLog, Post, PostMetric, Source
 from app.services.tiktok_client import TikTokClient
+
+
+_HASHTAG_RE = re.compile(r"(?<!\w)#(\w+)", re.UNICODE)
 
 
 def _now() -> datetime:
@@ -31,6 +35,37 @@ def _to_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _extract_hashtags(description: str | None) -> list[str]:
+    if not description:
+        return []
+
+    tags = []
+    seen = set()
+    for match in _HASHTAG_RE.finditer(description):
+        tag = match.group(1).lower()
+        if tag not in seen:
+            seen.add(tag)
+            tags.append(tag)
+    return tags
+
+
+def _attach_post_hashtags(db: Session, post: Post) -> None:
+    tags = _extract_hashtags(post.description)
+    if not tags:
+        return
+
+    existing = db.query(Hashtag).filter(Hashtag.tag.in_(tags)).all()
+    hashtags_by_tag = {hashtag.tag: hashtag for hashtag in existing}
+
+    for tag in tags:
+        hashtag = hashtags_by_tag.get(tag)
+        if hashtag is None:
+            hashtag = Hashtag(tag=tag)
+            db.add(hashtag)
+            hashtags_by_tag[tag] = hashtag
+        post.hashtags.append(hashtag)
 
 
 def _video_id(video: Any, data: dict[str, Any] | None = None) -> str | None:
@@ -160,6 +195,7 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
             post = _video_to_post(source.id, video)
             db.add(post)
             db.flush()
+            _attach_post_hashtags(db, post)
 
             recorded_at = _now()
             metric = _video_to_metric(post, video, job.id, recorded_at)
