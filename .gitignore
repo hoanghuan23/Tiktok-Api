@@ -23,6 +23,9 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+#data
+*.sqbpro
+
 # Virtual environments
 my_env/
 venv/

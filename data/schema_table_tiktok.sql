@@ -59,6 +59,17 @@ CREATE TABLE IF NOT EXISTS hashtags (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ix_hashtags_tag ON hashtags (tag);
 
+-- bảng post_hashtags liên kết posts với hashtags (many-to-many)
+CREATE TABLE IF NOT EXISTS post_hashtags (
+    post_id    INTEGER NOT NULL,
+    hashtag_id INTEGER NOT NULL,
+    PRIMARY KEY (post_id, hashtag_id),
+    FOREIGN KEY (post_id)    REFERENCES posts    (id) ON DELETE CASCADE,
+    FOREIGN KEY (hashtag_id) REFERENCES hashtags (id) ON DELETE CASCADE
+);
+-- index chiều ngược: từ hashtag → posts (dùng cho query theo tag)
+CREATE INDEX IF NOT EXISTS idx_post_hashtags_hashtag ON post_hashtags (hashtag_id);
+
 -- bảng posts lưu trữ thông tin video TikTok của từng nguồn cùng trạng thái theo dõi metric
 CREATE TABLE posts (
         id INTEGER NOT NULL,
@@ -110,14 +121,15 @@ CREATE INDEX idx_analytics_source_date ON analytics_cache (source_id, date);
 
 -- bảng post_metrics lưu lịch sử thay đổi chỉ số (likes, shares, comments, views, plays) theo thời gian
 CREATE TABLE post_metrics (
-        id INTEGER NOT NULL,
-        post_id INTEGER NOT NULL,
-        likes_count INTEGER,
-        shares_count INTEGER,
-        comments_count INTEGER,
-        views_count INTEGER,
-        recorded_at DATETIME,
-        job_id INTEGER REFERENCES pipeline_jobs(id) ON DELETE SET NULL,
+        id              INTEGER NOT NULL,
+        post_id         INTEGER NOT NULL,
+        likes_count     INTEGER,
+        shares_count    INTEGER,
+        comments_count  INTEGER,
+        views_count     INTEGER,
+        bookmarks_count INTEGER,  -- lượt lưu / yêu thích (collectCount)
+        recorded_at     DATETIME,
+        job_id          INTEGER REFERENCES pipeline_jobs(id) ON DELETE SET NULL,
         PRIMARY KEY (id),
         FOREIGN KEY(post_id) REFERENCES posts (id)
 );
