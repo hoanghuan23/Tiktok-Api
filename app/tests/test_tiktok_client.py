@@ -59,17 +59,50 @@ class _FakeSearchApi:
         self.closed = True
 
 
+class _FakeHashtag:
+    def __init__(self, videos, calls):
+        self._videos = videos
+        self._calls = calls
+
+    def videos(self, count):
+        self._calls.append(count)
+        return _AsyncVideos(self._videos[:count])
+
+
+class _FakeHashtagApi:
+    def __init__(self, videos):
+        self.calls = []
+        self.hashtag_names = []
+        self._videos = videos
+        self.closed = False
+
+    def hashtag(self, name):
+        self.hashtag_names.append(name)
+        return _FakeHashtag(self._videos, self.calls)
+
+    async def close_sessions(self):
+        self.closed = True
+
+
 def _timestamp(value):
     return int(value.replace(tzinfo=timezone.utc).timestamp())
 
 
-def _keyword_video(video_id, created_at, stats=None, stats_key="stats"):
+def _source_video(video_id, created_at, stats=None, stats_key="stats"):
     data = {"id": video_id}
     if created_at is not None:
         data["createTime"] = _timestamp(created_at)
     if stats is not None:
         data[stats_key] = stats
     return SimpleNamespace(id=video_id, as_dict=data)
+
+
+def _keyword_video(video_id, created_at, stats=None, stats_key="stats"):
+    return _source_video(video_id, created_at, stats, stats_key)
+
+
+def _hashtag_video(video_id, created_at, stats=None, stats_key="stats"):
+    return _source_video(video_id, created_at, stats, stats_key)
 
 
 @pytest.mark.asyncio
@@ -158,6 +191,125 @@ async def test_get_user_videos_uses_create_time_from_as_dict_when_attribute_is_m
     recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=now - timedelta(hours=24))
 
     assert [video.id for video in recent_videos] == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_get_hashtag_videos_uses_hashtag_feed_and_limits_raw_results():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    videos = [
+        _hashtag_video("1", now - timedelta(hours=1), {"playCount": "100"}),
+        _hashtag_video("2", now - timedelta(hours=1), {"playCount": "200"}),
+        _hashtag_video("ignored-by-max-count", now - timedelta(hours=1), {"playCount": "999999"}),
+    ]
+    api = _FakeHashtagApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    hashtag_videos = await client.get_hashtag_videos("vtv24h", max_count=2)
+
+    assert [video.id for video in hashtag_videos] == ["2", "1"]
+    assert api.hashtag_names == ["vtv24h"]
+    assert api.calls == [2]
+    assert api.closed is True
+
+
+@pytest.mark.asyncio
+async def test_get_hashtag_videos_filters_last_24_hours_and_missing_create_time():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    videos = [
+        _hashtag_video("recent", now - timedelta(hours=1), {"playCount": 10}),
+        _hashtag_video("old", now - timedelta(hours=25), {"playCount": 999}),
+        _hashtag_video("missing-create-time", None, {"playCount": 999}),
+    ]
+    api = _FakeHashtagApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    hashtag_videos = await client.get_hashtag_videos("vtv24h", max_count=30)
+
+    assert [video.id for video in hashtag_videos] == ["recent"]
+
+
+@pytest.mark.asyncio
+async def test_get_hashtag_videos_sorts_by_interaction_score_from_stats_and_stats_v2():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    videos = [
+        _hashtag_video(
+            "views-only",
+            now - timedelta(hours=1),
+            {"playCount": "100", "diggCount": "0", "commentCount": "0", "shareCount": "0", "collectCount": "0"},
+        ),
+        _hashtag_video(
+            "stats-v2-engagement",
+            now - timedelta(hours=2),
+            {"playCount": "1", "diggCount": "10", "commentCount": "3", "shareCount": "2", "collectCount": "1"},
+            stats_key="statsV2",
+        ),
+        _hashtag_video(
+            "shares-win",
+            now - timedelta(hours=3),
+            {"playCount": "10", "diggCount": "0", "commentCount": "0", "shareCount": "20", "collectCount": "0"},
+        ),
+    ]
+    api = _FakeHashtagApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    hashtag_videos = await client.get_hashtag_videos("vtv24h", max_count=30)
+
+    assert [video.id for video in hashtag_videos] == ["shares-win", "stats-v2-engagement", "views-only"]
+
+
+@pytest.mark.asyncio
+async def test_get_hashtag_videos_returns_top_15_when_more_recent_videos_match():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    videos = [
+        _hashtag_video(str(index), now - timedelta(hours=1), {"playCount": index})
+        for index in range(20)
+    ]
+    api = _FakeHashtagApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    hashtag_videos = await client.get_hashtag_videos("vtv24h", max_count=30)
+
+    assert [video.id for video in hashtag_videos] == [str(index) for index in range(19, 4, -1)]
+
+
+@pytest.mark.asyncio
+async def test_get_hashtag_videos_returns_all_matches_when_fewer_than_15_are_recent():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    videos = [
+        _hashtag_video("1", now - timedelta(hours=1), {"playCount": 10}),
+        _hashtag_video("2", now - timedelta(hours=2), {"playCount": 20}),
+    ]
+    api = _FakeHashtagApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    hashtag_videos = await client.get_hashtag_videos("vtv24h", max_count=30)
+
+    assert [video.id for video in hashtag_videos] == ["2", "1"]
 
 
 @pytest.mark.asyncio

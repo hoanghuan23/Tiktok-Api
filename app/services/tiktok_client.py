@@ -10,7 +10,7 @@ from app.models import TikTokSession
 
 class TikTokClient:
     MAX_CONSECUTIVE_OLD_USER_VIDEOS = 5
-    MAX_KEYWORD_TOP_VIDEOS = 15
+    MAX_TOP_RECENT_VIDEOS = 15
 
     def __init__(self, db: Session):
         self.db = db
@@ -102,7 +102,7 @@ class TikTokClient:
         return views + likes * 5 + comments * 10 + shares * 8 + collect * 7
 
     @classmethod
-    def _filter_recent_top_keyword_videos(cls, videos: list[Any]) -> list[Any]:
+    def _filter_recent_top_videos(cls, videos: list[Any]) -> list[Any]:
         cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
         recent_videos = []
         for video in videos:
@@ -112,7 +112,7 @@ class TikTokClient:
             recent_videos.append(video)
 
         return sorted(recent_videos, key=cls.video_interaction_score, reverse=True)[
-            : cls.MAX_KEYWORD_TOP_VIDEOS
+            : cls.MAX_TOP_RECENT_VIDEOS
         ]
 
     async def get_user_videos(
@@ -170,7 +170,7 @@ class TikTokClient:
                 videos.append(video)
                 if len(videos) >= max_count:
                     break
-            return videos
+            return self._filter_recent_top_videos(videos)
         finally:
             await api.close_sessions()
 
@@ -182,7 +182,7 @@ class TikTokClient:
                 videos.append(video)
                 if len(videos) >= max_count:
                     break
-            return self._filter_recent_top_keyword_videos(videos)
+            return self._filter_recent_top_videos(videos)
         finally:
             await api.close_sessions()
 
