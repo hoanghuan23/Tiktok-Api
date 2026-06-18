@@ -177,8 +177,10 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
             )
         elif source.source_type == "hashtag":
             videos = await client.get_hashtag_videos(source.identifier, max_count)
+        elif source.source_type == "keyword":
+            videos = await client.get_keyword_videos(source.identifier, max_count)
         else:
-            # TODO: bo sung crawler cho sound/keyword.
+            # TODO: bo sung crawler cho sound.
             raise ValueError(f"Chua ho tro crawl source_type={source.source_type}")
 
         posts_new = 0

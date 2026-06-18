@@ -89,6 +89,53 @@ def test_crawl_hashtag_source_does_not_use_user_video_cutoff(monkeypatch):
     assert hashtag_calls == [("python", 30)]
 
 
+def test_crawl_keyword_source_uses_keyword_search_like_hashtag(monkeypatch):
+    async def fail_if_user_videos_called(self, username, max_count, since=None):
+        raise AssertionError("user cutoff should only apply to user sources")
+
+    keyword_calls = []
+    video = SimpleNamespace(
+        id="video-kw-1",
+        as_dict={
+            "id": "video-kw-1",
+            "desc": "Ket qua tim kiem #keyword",
+            "createTime": 1767351600,
+            "author": {"uniqueId": "search_author"},
+            "statsV2": {
+                "diggCount": "10",
+                "shareCount": "2",
+                "commentCount": "1",
+                "playCount": "100",
+                "collectCount": "3",
+            },
+        },
+    )
+
+    async def fake_get_keyword_videos(self, keyword, max_count):
+        keyword_calls.append((keyword, max_count))
+        return [video]
+
+    monkeypatch.setattr(TikTokClient, "get_user_videos", fail_if_user_videos_called)
+    monkeypatch.setattr(TikTokClient, "get_keyword_videos", fake_get_keyword_videos)
+    db = _session()
+    source = Source(source_type="keyword", identifier="doreamon", is_active=True)
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    job = asyncio.run(crawl_source(db, source, max_count=30))
+    post = db.query(Post).filter(Post.tiktok_video_id == "video-kw-1").one()
+    metric = db.query(PostMetric).filter(PostMetric.post_id == post.id).one()
+
+    assert job.status == "done"
+    assert job.posts_found == 1
+    assert job.posts_new == 1
+    assert keyword_calls == [("doreamon", 30)]
+    assert post.tiktok_url == "https://www.tiktok.com/@search_author/video/video-kw-1"
+    assert [hashtag.tag for hashtag in post.hashtags] == ["keyword"]
+    assert metric.views_count == 100
+
+
 def test_crawl_source_saves_posted_at_from_video_as_dict_create_time(monkeypatch):
     expected_posted_at = datetime(2026, 1, 2, 11, 0, 0)
     create_time = int(expected_posted_at.replace(tzinfo=timezone.utc).timestamp())

@@ -20,9 +20,9 @@ async def crawl_source_job(
     source = db.get(Source, source_id)
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
-    if source.source_type not in {"user", "hashtag"}:
-        # TODO: ho tro sound/keyword crawler.
-        raise HTTPException(status_code=400, detail="Chi ho tro crawl user/hashtag trong skeleton")
+    if source.source_type not in {"user", "hashtag", "keyword"}:
+        # TODO: ho tro sound crawler.
+        raise HTTPException(status_code=400, detail="Chi ho tro crawl user/hashtag/keyword")
     return await crawl_source(db, source, max_count=max_count)
 
 

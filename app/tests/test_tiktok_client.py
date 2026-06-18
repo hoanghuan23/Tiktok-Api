@@ -39,6 +39,26 @@ class _FakeApi:
         self.closed = True
 
 
+class _FakeSearch:
+    def __init__(self, videos, calls):
+        self._videos = videos
+        self._calls = calls
+
+    def search_type(self, keyword, search_type):
+        self._calls.append((keyword, search_type))
+        return _AsyncVideos(self._videos)
+
+
+class _FakeSearchApi:
+    def __init__(self, videos):
+        self.calls = []
+        self.search = _FakeSearch(videos, self.calls)
+        self.closed = False
+
+    async def close_sessions(self):
+        self.closed = True
+
+
 @pytest.mark.asyncio
 async def test_get_user_videos_stops_after_five_consecutive_old_videos():
     now = datetime(2026, 1, 2, 12, 0, 0)
@@ -128,6 +148,28 @@ async def test_get_user_videos_uses_create_time_from_as_dict_when_attribute_is_m
     recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=now - timedelta(hours=24))
 
     assert [video.id for video in recent_videos] == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_get_keyword_videos_uses_search_items_and_limits_results():
+    videos = [
+        SimpleNamespace(id="1"),
+        SimpleNamespace(id="2"),
+        SimpleNamespace(id="3"),
+    ]
+    api = _FakeSearchApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    keyword_videos = await client.get_keyword_videos("doreamon", max_count=2)
+
+    assert [video.id for video in keyword_videos] == ["1", "2"]
+    assert api.calls == [("doreamon", "item")]
+    assert api.closed is True
 
 
 @pytest.mark.asyncio

@@ -136,6 +136,18 @@ class TikTokClient:
         finally:
             await api.close_sessions()
 
+    async def get_keyword_videos(self, keyword: str, max_count: int) -> list[Any]:
+        api = await self._create_api()
+        try:
+            videos = []
+            async for video in api.search.search_type(keyword, "item"):
+                videos.append(video)
+                if len(videos) >= max_count:
+                    break
+            return videos
+        finally:
+            await api.close_sessions()
+
     async def get_video_comments(self, video_id: str, max_count: int) -> list[Any]:
         api = await self._create_api()
         try:
