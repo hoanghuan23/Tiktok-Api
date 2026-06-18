@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import Hashtag, PipelineJob, PipelineLog, Post, PostMetric, Source
+from app.models import Hashtag, PipelineJob, PipelineLog, Post, PostMetric, Source, TaskLog
 from app.services.tiktok_client import TikTokClient
 
 
@@ -154,6 +154,30 @@ def add_job_log(
     )
 
 
+def add_task_log(db: Session, job: PipelineJob) -> None:
+    completed_at = job.finished_at or _now()
+    started_at = job.started_at or completed_at
+    task_names = {
+        "scrape_24h": "scrape_posts",
+        "scraper_job": "scrape_posts",
+        "update_metric": "update_metrics",
+        "analytics": "generate_analytics",
+    }
+    db.add(
+        TaskLog(
+            task_name=task_names.get(job.job_type, job.job_type),
+            status=job.status,
+            started_at=started_at,
+            completed_at=completed_at,
+            duration_seconds=(completed_at - started_at).total_seconds(),
+            items_processed=job.items_total,
+            errors_count=job.items_failed,
+            error_message=job.error_message,
+            created_at=_now(),
+        )
+    )
+
+
 async def crawl_source(db: Session, source: Source, max_count: int = 30) -> PipelineJob:
     client = TikTokClient(db)
     session_record = client.get_session_record()
@@ -214,6 +238,7 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
         job.finished_at = _now()
         source.last_scraped = job.finished_at
         add_job_log(db, job, f"Crawl xong: found={len(videos)}, new={posts_new}")
+        add_task_log(db, job)
         # TODO: tinh next_scrape theo tier/schedule_override_minutes.
         db.commit()
     except Exception as exc:
@@ -222,6 +247,7 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
         job.items_failed = max(job.items_failed, 1)
         job.finished_at = _now()
         add_job_log(db, job, "Crawl source that bai", "ERROR", type(exc).__name__, str(exc))
+        add_task_log(db, job)
         db.commit()
 
     db.refresh(job)

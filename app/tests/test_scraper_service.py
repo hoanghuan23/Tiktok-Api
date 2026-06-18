@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
-from app.models import Hashtag, Post, PostHashtag, PostMetric, Source
+from app.models import Hashtag, Post, PostHashtag, PostMetric, Source, TaskLog
 from app.services import scraper_service
 from app.services.scraper_service import crawl_source
 from app.services.tiktok_client import TikTokClient
@@ -63,6 +63,47 @@ def test_crawl_user_source_only_requests_videos_since_last_24_hours(monkeypatch)
     assert username == "vtv24news"
     assert max_count == 30
     assert before_cutoff <= since <= after_cutoff
+
+
+def test_crawl_source_writes_task_log_summary(monkeypatch):
+    async def fake_get_user_videos(self, username, max_count, since=None):
+        return []
+
+    monkeypatch.setattr(TikTokClient, "get_user_videos", fake_get_user_videos)
+    db = _session()
+    source = Source(source_type="user", identifier="vtv24news", is_active=True)
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    job = asyncio.run(crawl_source(db, source, max_count=30))
+    task_log = db.query(TaskLog).one()
+
+    assert job.status == "done"
+    assert task_log.task_name == "scrape_posts"
+    assert task_log.status == "done"
+    assert task_log.started_at == job.started_at
+    assert task_log.completed_at == job.finished_at
+    assert task_log.items_processed == 0
+    assert task_log.errors_count == 0
+    assert task_log.error_message is None
+
+
+def test_crawl_source_writes_failed_task_log_summary():
+    db = _session()
+    source = Source(source_type="sound", identifier="sound-1", is_active=True)
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    job = asyncio.run(crawl_source(db, source, max_count=30))
+    task_log = db.query(TaskLog).one()
+
+    assert job.status == "failed"
+    assert task_log.task_name == "scrape_posts"
+    assert task_log.status == "failed"
+    assert task_log.errors_count == 1
+    assert "Chua ho tro crawl source_type=sound" in task_log.error_message
 
 
 def test_crawl_hashtag_source_does_not_use_user_video_cutoff(monkeypatch):

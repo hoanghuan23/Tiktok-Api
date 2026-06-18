@@ -4,7 +4,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models import PipelineJob, Post, PostMetric
-from app.services.scraper_service import add_job_log
+from app.services.scraper_service import add_job_log, add_task_log
 from app.services.tiktok_client import TikTokClient
 
 
@@ -61,6 +61,7 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
         job.status = "done"
         job.finished_at = recorded_at
         add_job_log(db, job, "Update metric xong")
+        add_task_log(db, job)
         # TODO: cap nhat metric_tier, velocity, next_metric_update.
         db.commit()
     except Exception as exc:
@@ -69,6 +70,7 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
         job.error_message = str(exc)
         job.finished_at = _now()
         add_job_log(db, job, "Update metric that bai", "ERROR", type(exc).__name__, str(exc))
+        add_task_log(db, job)
         db.commit()
 
     db.refresh(job)
