@@ -48,7 +48,7 @@ class PipelineLog(Base):
     id = Column(Integer, primary_key=True)
     job_id = Column(Integer, ForeignKey("pipeline_jobs.id", ondelete="SET NULL"))
     source_id = Column(Integer, ForeignKey("sources.id"))
-    log_level = Column(String(20))
+    log_level = Column(String(20), nullable=False, default="ERROR")
     message = Column(Text, nullable=False)
     error_type = Column(String(100))
     error_details = Column(Text)

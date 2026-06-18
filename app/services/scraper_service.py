@@ -148,15 +148,18 @@ def add_job_log(
     db: Session,
     job: PipelineJob,
     message: str,
-    log_level: str = "INFO",
+    log_level: str = "ERROR",
     error_type: str | None = None,
     error_details: str | None = None,
 ) -> None:
+    if log_level.upper() != "ERROR":
+        return
+
     db.add(
         PipelineLog(
             job_id=job.id,
             source_id=job.source_id,
-            log_level=log_level,
+            log_level="ERROR",
             message=message,
             error_type=error_type,
             error_details=error_details,
@@ -256,7 +259,6 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
         job.finished_at = _now()
         source.last_scraped = job.finished_at
         refresh_source_schedule(db, source, job.finished_at)
-        add_job_log(db, job, f"Crawl xong: found={len(videos)}, new={posts_new}")
         add_task_log(db, job)
         db.commit()
     except Exception as exc:

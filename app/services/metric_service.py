@@ -62,7 +62,6 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
         job.items_updated = 1
         job.status = "done"
         job.finished_at = recorded_at
-        add_job_log(db, job, "Update metric xong")
         add_task_log(db, job)
         db.commit()
     except Exception as exc:

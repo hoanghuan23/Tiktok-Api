@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
-from app.models import Hashtag, Post, PostHashtag, PostMetric, Source, TaskLog
+from app.models import Hashtag, PipelineLog, Post, PostHashtag, PostMetric, Source, TaskLog
 from app.services import scraper_service
 from app.services.scraper_service import crawl_source
 from app.services.tiktok_client import TikTokClient
@@ -90,6 +90,7 @@ def test_crawl_source_writes_task_log_summary(monkeypatch):
     assert task_log.items_processed == 0
     assert task_log.errors_count == 0
     assert task_log.error_message is None
+    assert db.query(PipelineLog).count() == 0
 
 
 def test_crawl_source_writes_failed_task_log_summary():
@@ -107,6 +108,10 @@ def test_crawl_source_writes_failed_task_log_summary():
     assert task_log.status == "failed"
     assert task_log.errors_count == 1
     assert "Chua ho tro crawl source_type=sound" in task_log.error_message
+    pipeline_log = db.query(PipelineLog).one()
+    assert pipeline_log.log_level == "ERROR"
+    assert pipeline_log.error_type == "ValueError"
+    assert "Chua ho tro crawl source_type=sound" in pipeline_log.error_details
 
 
 def test_crawl_hashtag_source_does_not_use_user_video_cutoff(monkeypatch):

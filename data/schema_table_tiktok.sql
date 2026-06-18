@@ -185,13 +185,13 @@ CREATE TABLE pipeline_jobs (
 CREATE INDEX idx_pipeline_jobs_source_time ON pipeline_jobs (source_id, started_at);
 CREATE INDEX idx_pipeline_jobs_type_status ON pipeline_jobs (job_type, status, started_at);
 
--- bảng pipeline_logs lưu log chi tiết cho từng pipeline job để debug
+-- bảng pipeline_logs chỉ lưu log lỗi cho từng pipeline job để debug
 CREATE TABLE pipeline_logs (
     id              INTEGER PRIMARY KEY,
 
     job_id          INTEGER REFERENCES pipeline_jobs(id) ON DELETE SET NULL,
     source_id       INTEGER REFERENCES sources(id),
-    log_level       VARCHAR(20),
+    log_level       VARCHAR(20) NOT NULL DEFAULT 'ERROR' CHECK (log_level = 'ERROR'),
     message         TEXT NOT NULL,
     error_type      VARCHAR(100),
     error_details   TEXT,

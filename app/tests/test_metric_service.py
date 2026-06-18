@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
-from app.models import Post, Source, TaskLog
+from app.models import PipelineLog, Post, Source, TaskLog
 from app.services.metric_service import update_post_metric
 from app.services.tiktok_client import TikTokClient
 
@@ -55,3 +55,4 @@ def test_update_post_metric_writes_task_log_summary(monkeypatch):
     assert task_log.items_processed == 1
     assert task_log.errors_count == 0
     assert task_log.error_message is None
+    assert db.query(PipelineLog).count() == 0
