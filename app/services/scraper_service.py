@@ -117,6 +117,16 @@ def _video_to_post(source_id: int, video: Any) -> Post:
     )
 
 
+def _latest_posted_at_for_source(db: Session, source: Source) -> datetime | None:
+    return (
+        db.query(Post.posted_at)
+        .filter(Post.source_id == source.id)
+        .order_by(Post.posted_at.desc())
+        .limit(1)
+        .scalar()
+    )
+
+
 def _video_to_metric(post: Post, video: Any, job_id: int, recorded_at: datetime) -> PostMetric | None:
     data = getattr(video, "as_dict", {}) or {}
     stats = _video_stats(video, data)
@@ -208,12 +218,17 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
             # TODO: bo sung crawler cho sound.
             raise ValueError(f"Chua ho tro crawl source_type={source.source_type}")
 
+        latest_posted_at = _latest_posted_at_for_source(db, source) if source.source_type == "user" else None
         posts_new = 0
         for video in videos:
             tiktok_video_id = _video_id(video)
             if not tiktok_video_id:
                 job.items_failed += 1
                 continue
+
+            create_time = TikTokClient.video_create_time(video)
+            if latest_posted_at is not None and create_time is not None and create_time <= latest_posted_at:
+                break
 
             exists = db.query(Post).filter(Post.tiktok_video_id == tiktok_video_id).first()
             if exists:

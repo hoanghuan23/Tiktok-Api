@@ -336,3 +336,52 @@ def test_crawl_source_skips_duplicate_post_without_adding_hashtags(monkeypatch):
     assert job.posts_new == 0
     assert db.query(Hashtag).count() == 0
     assert db.query(PostHashtag).count() == 0
+
+
+def test_crawl_user_source_stops_when_video_reaches_latest_posted_at(monkeypatch):
+    latest_posted_at = datetime(2026, 1, 2, 11, 0, 0)
+
+    def video(video_id, posted_at):
+        return SimpleNamespace(
+            id=video_id,
+            as_dict={
+                "id": video_id,
+                "desc": f"Video {video_id}",
+                "createTime": int(posted_at.replace(tzinfo=timezone.utc).timestamp()),
+                "author": {"uniqueId": "vtv24news"},
+            },
+        )
+
+    videos = [
+        video("video-new", datetime(2026, 1, 2, 12, 0, 0)),
+        video("video-at-latest", latest_posted_at),
+        video("video-old", datetime(2026, 1, 2, 10, 0, 0)),
+    ]
+
+    async def fake_get_user_videos(self, username, max_count, since=None):
+        return videos
+
+    monkeypatch.setattr(TikTokClient, "get_user_videos", fake_get_user_videos)
+    db = _session()
+    source = Source(source_type="user", identifier="vtv24news", is_active=True)
+    db.add(source)
+    db.flush()
+    db.add(
+        Post(
+            source_id=source.id,
+            tiktok_video_id="existing-video",
+            tiktok_url="https://www.tiktok.com/@vtv24news/video/existing-video",
+            posted_at=latest_posted_at,
+        )
+    )
+    db.commit()
+    db.refresh(source)
+
+    job = asyncio.run(crawl_source(db, source, max_count=30))
+
+    assert job.status == "done"
+    assert job.posts_found == 3
+    assert job.posts_new == 1
+    assert db.query(Post).filter(Post.tiktok_video_id == "video-new").count() == 1
+    assert db.query(Post).filter(Post.tiktok_video_id == "video-at-latest").count() == 0
+    assert db.query(Post).filter(Post.tiktok_video_id == "video-old").count() == 0
