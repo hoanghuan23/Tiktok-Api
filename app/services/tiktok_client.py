@@ -10,6 +10,7 @@ from app.models import TikTokSession
 
 class TikTokClient:
     MAX_CONSECUTIVE_OLD_USER_VIDEOS = 5
+    MAX_KEYWORD_TOP_VIDEOS = 15
 
     def __init__(self, db: Session):
         self.db = db
@@ -69,13 +70,50 @@ class TikTokClient:
         create_time = getattr(video, "create_time", None)
         if isinstance(create_time, datetime):
             return cls._comparable_datetime(create_time)
-        
+
         return None
 
     @staticmethod
     def video_is_pinned(video: Any) -> bool:
         data = getattr(video, "as_dict", {}) or {}
         return bool(data.get("isPinnedPost") or data.get("isPinned"))
+
+    @staticmethod
+    def _video_stats(video: Any) -> dict[str, Any]:
+        data = getattr(video, "as_dict", {}) or {}
+        stats = data.get("statsV2") or data.get("stats") or getattr(video, "stats", None)
+        return stats if isinstance(stats, dict) else {}
+
+    @staticmethod
+    def _stat_int(stats: dict[str, Any], key: str) -> int:
+        try:
+            return int(stats.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def video_interaction_score(cls, video: Any) -> int:
+        stats = cls._video_stats(video)
+        views = cls._stat_int(stats, "playCount")
+        likes = cls._stat_int(stats, "diggCount")
+        comments = cls._stat_int(stats, "commentCount")
+        shares = cls._stat_int(stats, "shareCount")
+        collect = cls._stat_int(stats, "collectCount")
+        return views + likes * 5 + comments * 10 + shares * 8 + collect * 7
+
+    @classmethod
+    def _filter_recent_top_keyword_videos(cls, videos: list[Any]) -> list[Any]:
+        cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
+        recent_videos = []
+        for video in videos:
+            create_time = cls.video_create_time(video)
+            if create_time is None or create_time < cutoff_time:
+                continue
+            recent_videos.append(video)
+
+        return sorted(recent_videos, key=cls.video_interaction_score, reverse=True)[
+            : cls.MAX_KEYWORD_TOP_VIDEOS
+        ]
 
     async def get_user_videos(
         self,
@@ -144,7 +182,7 @@ class TikTokClient:
                 videos.append(video)
                 if len(videos) >= max_count:
                     break
-            return videos
+            return self._filter_recent_top_keyword_videos(videos)
         finally:
             await api.close_sessions()
 

@@ -59,6 +59,19 @@ class _FakeSearchApi:
         self.closed = True
 
 
+def _timestamp(value):
+    return int(value.replace(tzinfo=timezone.utc).timestamp())
+
+
+def _keyword_video(video_id, created_at, stats=None, stats_key="stats"):
+    data = {"id": video_id}
+    if created_at is not None:
+        data["createTime"] = _timestamp(created_at)
+    if stats is not None:
+        data[stats_key] = stats
+    return SimpleNamespace(id=video_id, as_dict=data)
+
+
 @pytest.mark.asyncio
 async def test_get_user_videos_stops_after_five_consecutive_old_videos():
     now = datetime(2026, 1, 2, 12, 0, 0)
@@ -126,16 +139,13 @@ async def test_get_user_videos_skips_old_pinned_videos_before_recent_videos():
 async def test_get_user_videos_uses_create_time_from_as_dict_when_attribute_is_missing():
     now = datetime(2026, 1, 2, 12, 0, 0)
 
-    def timestamp(value):
-        return int(value.replace(tzinfo=timezone.utc).timestamp())
-
     videos = [
-        SimpleNamespace(id="1", as_dict={"createTime": timestamp(now - timedelta(hours=1))}),
-        SimpleNamespace(id="2", as_dict={"createTime": timestamp(now - timedelta(hours=25))}),
-        SimpleNamespace(id="3", as_dict={"createTime": timestamp(now - timedelta(hours=26))}),
-        SimpleNamespace(id="4", as_dict={"createTime": timestamp(now - timedelta(hours=27))}),
-        SimpleNamespace(id="5", as_dict={"createTime": timestamp(now - timedelta(hours=28))}),
-        SimpleNamespace(id="6", as_dict={"createTime": timestamp(now - timedelta(hours=29))}),
+        SimpleNamespace(id="1", as_dict={"createTime": _timestamp(now - timedelta(hours=1))}),
+        SimpleNamespace(id="2", as_dict={"createTime": _timestamp(now - timedelta(hours=25))}),
+        SimpleNamespace(id="3", as_dict={"createTime": _timestamp(now - timedelta(hours=26))}),
+        SimpleNamespace(id="4", as_dict={"createTime": _timestamp(now - timedelta(hours=27))}),
+        SimpleNamespace(id="5", as_dict={"createTime": _timestamp(now - timedelta(hours=28))}),
+        SimpleNamespace(id="6", as_dict={"createTime": _timestamp(now - timedelta(hours=29))}),
     ]
     api = _FakeApi(videos)
     client = TikTokClient(db=None)
@@ -151,11 +161,12 @@ async def test_get_user_videos_uses_create_time_from_as_dict_when_attribute_is_m
 
 
 @pytest.mark.asyncio
-async def test_get_keyword_videos_uses_search_items_and_limits_results():
+async def test_get_keyword_videos_uses_search_items_and_limits_raw_results():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     videos = [
-        SimpleNamespace(id="1"),
-        SimpleNamespace(id="2"),
-        SimpleNamespace(id="3"),
+        _keyword_video("1", now - timedelta(hours=1), {"playCount": "100"}),
+        _keyword_video("2", now - timedelta(hours=1), {"playCount": "200"}),
+        _keyword_video("ignored-by-max-count", now - timedelta(hours=1), {"playCount": "999999"}),
     ]
     api = _FakeSearchApi(videos)
     client = TikTokClient(db=None)
@@ -167,9 +178,104 @@ async def test_get_keyword_videos_uses_search_items_and_limits_results():
 
     keyword_videos = await client.get_keyword_videos("doreamon", max_count=2)
 
-    assert [video.id for video in keyword_videos] == ["1", "2"]
+    assert [video.id for video in keyword_videos] == ["2", "1"]
     assert api.calls == [("doreamon", "item")]
     assert api.closed is True
+
+
+@pytest.mark.asyncio
+async def test_get_keyword_videos_filters_last_24_hours_and_missing_create_time():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    videos = [
+        _keyword_video("recent", now - timedelta(hours=1), {"playCount": 10}),
+        _keyword_video("old", now - timedelta(hours=25), {"playCount": 999}),
+        _keyword_video("missing-create-time", None, {"playCount": 999}),
+    ]
+    api = _FakeSearchApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    keyword_videos = await client.get_keyword_videos("doreamon", max_count=30)
+
+    assert [video.id for video in keyword_videos] == ["recent"]
+
+
+@pytest.mark.asyncio
+async def test_get_keyword_videos_sorts_by_interaction_score_from_stats_and_stats_v2():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    videos = [
+        _keyword_video(
+            "views-only",
+            now - timedelta(hours=1),
+            {"playCount": "100", "diggCount": "0", "commentCount": "0", "shareCount": "0", "collectCount": "0"},
+        ),
+        _keyword_video(
+            "stats-v2-engagement",
+            now - timedelta(hours=2),
+            {"playCount": "1", "diggCount": "10", "commentCount": "3", "shareCount": "2", "collectCount": "1"},
+            stats_key="statsV2",
+        ),
+        _keyword_video(
+            "shares-win",
+            now - timedelta(hours=3),
+            {"playCount": "10", "diggCount": "0", "commentCount": "0", "shareCount": "20", "collectCount": "0"},
+        ),
+    ]
+    api = _FakeSearchApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    keyword_videos = await client.get_keyword_videos("doreamon", max_count=30)
+
+    assert [video.id for video in keyword_videos] == ["shares-win", "stats-v2-engagement", "views-only"]
+
+
+@pytest.mark.asyncio
+async def test_get_keyword_videos_returns_top_15_when_more_recent_videos_match():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    videos = [
+        _keyword_video(str(index), now - timedelta(hours=1), {"playCount": index})
+        for index in range(20)
+    ]
+    api = _FakeSearchApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    keyword_videos = await client.get_keyword_videos("doreamon", max_count=30)
+
+    assert [video.id for video in keyword_videos] == [str(index) for index in range(19, 4, -1)]
+
+
+@pytest.mark.asyncio
+async def test_get_keyword_videos_returns_all_matches_when_fewer_than_15_are_recent():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    videos = [
+        _keyword_video("1", now - timedelta(hours=1), {"playCount": 10}),
+        _keyword_video("2", now - timedelta(hours=2), {"playCount": 20}),
+    ]
+    api = _FakeSearchApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    keyword_videos = await client.get_keyword_videos("doreamon", max_count=30)
+
+    assert [video.id for video in keyword_videos] == ["2", "1"]
 
 
 @pytest.mark.asyncio
