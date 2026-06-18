@@ -20,6 +20,15 @@ def _user_video_cutoff() -> datetime:
     return _now() - timedelta(hours=24)
 
 
+def _user_video_since(db: Session, source: Source, latest_posted_at: datetime | None = None) -> datetime:
+    cutoff = _user_video_cutoff()
+    if latest_posted_at is None:
+        latest_posted_at = _latest_posted_at_for_source(db, source)
+    if latest_posted_at is None:
+        return cutoff
+    return max(cutoff, latest_posted_at)
+
+
 def _get_nested(data: dict[str, Any], *keys: str) -> Any:
     current: Any = data
     for key in keys:
@@ -207,11 +216,13 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
     db.refresh(job)
 
     try:
+        latest_posted_at = None
         if source.source_type == "user":
+            latest_posted_at = _latest_posted_at_for_source(db, source)
             videos = await client.get_user_videos(
                 source.identifier,
                 max_count,
-                since=_user_video_cutoff(),
+                since=_user_video_since(db, source, latest_posted_at),
             )
         elif source.source_type == "hashtag":
             videos = await client.get_hashtag_videos(source.identifier, max_count)
@@ -221,11 +232,12 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
             # TODO: bo sung crawler cho sound.
             raise ValueError(f"Chua ho tro crawl source_type={source.source_type}")
 
-        latest_posted_at = _latest_posted_at_for_source(db, source) if source.source_type == "user" else None
         posts_new = 0
+        items_total = 0
         for video in videos:
             tiktok_video_id = _video_id(video)
             if not tiktok_video_id:
+                items_total += 1
                 job.items_failed += 1
                 continue
 
@@ -233,6 +245,7 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
             if latest_posted_at is not None and create_time is not None and create_time <= latest_posted_at:
                 break
 
+            items_total += 1
             exists = db.query(Post).filter(Post.tiktok_video_id == tiktok_video_id).first()
             if exists:
                 continue
@@ -251,9 +264,9 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
                 post.next_metric_update = next_metric_update_at(recorded_at)
             posts_new += 1
 
-        job.posts_found = len(videos)
+        job.posts_found = items_total
         job.posts_new = posts_new
-        job.items_total = len(videos)
+        job.items_total = items_total
         job.items_updated = posts_new
         job.status = "done"
         job.finished_at = _now()

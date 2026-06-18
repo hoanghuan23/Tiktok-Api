@@ -38,7 +38,7 @@ class TikTokClient:
         ms_token = self._get_ms_token()
         api = TikTokApi()
         session_kwargs = {
-            "num_sessions": 1,
+            "num_sessions": 3,
             "headless": self.settings.tiktok_headless,
             "browser": self.settings.tiktok_browser,
             "sleep_after": self.settings.tiktok_sleep_after,
@@ -133,7 +133,7 @@ class TikTokClient:
             async for video in api.user(username=username).videos(count=max_count):
                 create_time = self.video_create_time(video)
                 if cutoff_time and create_time:
-                    if create_time < cutoff_time:
+                    if create_time <= cutoff_time:
                         if self.video_is_pinned(video):
                             continue
 

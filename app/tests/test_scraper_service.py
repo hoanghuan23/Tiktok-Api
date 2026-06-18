@@ -65,6 +65,38 @@ def test_crawl_user_source_only_requests_videos_since_last_24_hours(monkeypatch)
     assert before_cutoff <= since <= after_cutoff
 
 
+def test_crawl_user_source_uses_latest_posted_at_when_it_is_newer_than_24h(monkeypatch):
+    calls = []
+
+    async def fake_get_user_videos(self, username, max_count, since=None):
+        calls.append((username, max_count, since))
+        return []
+
+    monkeypatch.setattr(TikTokClient, "get_user_videos", fake_get_user_videos)
+    db = _session()
+    source = Source(source_type="user", identifier="vtv24news", is_active=True)
+    db.add(source)
+    db.flush()
+    latest_posted_at = scraper_service._now() - timedelta(hours=2)
+    db.add(
+        Post(
+            source_id=source.id,
+            tiktok_video_id="existing-video",
+            tiktok_url="https://www.tiktok.com/@vtv24news/video/existing-video",
+            posted_at=latest_posted_at,
+        )
+    )
+    db.commit()
+    db.refresh(source)
+
+    job = asyncio.run(crawl_source(db, source, max_count=30))
+
+    assert job.status == "done"
+    assert len(calls) == 1
+    _, _, since = calls[0]
+    assert since == latest_posted_at
+
+
 def test_crawl_source_writes_task_log_summary(monkeypatch):
     async def fake_get_user_videos(self, username, max_count, since=None):
         return []
@@ -385,7 +417,8 @@ def test_crawl_user_source_stops_when_video_reaches_latest_posted_at(monkeypatch
     job = asyncio.run(crawl_source(db, source, max_count=30))
 
     assert job.status == "done"
-    assert job.posts_found == 3
+    assert job.posts_found == 1
+    assert job.items_total == 1
     assert job.posts_new == 1
     assert db.query(Post).filter(Post.tiktok_video_id == "video-new").count() == 1
     assert db.query(Post).filter(Post.tiktok_video_id == "video-at-latest").count() == 0

@@ -194,6 +194,28 @@ async def test_get_user_videos_uses_create_time_from_as_dict_when_attribute_is_m
 
 
 @pytest.mark.asyncio
+async def test_get_user_videos_excludes_videos_at_since_boundary():
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    cutoff = now - timedelta(hours=2)
+    videos = [
+        SimpleNamespace(id="new", create_time=cutoff + timedelta(minutes=1)),
+        SimpleNamespace(id="at-cutoff", create_time=cutoff),
+        SimpleNamespace(id="old", create_time=cutoff - timedelta(minutes=1)),
+    ]
+    api = _FakeApi(videos)
+    client = TikTokClient(db=None)
+
+    async def fake_create_api():
+        return api
+
+    client._create_api = fake_create_api
+
+    recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=cutoff)
+
+    assert [video.id for video in recent_videos] == ["new"]
+
+
+@pytest.mark.asyncio
 async def test_get_hashtag_videos_uses_hashtag_feed_and_limits_raw_results():
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     videos = [
