@@ -12,6 +12,7 @@ class AnalyticsCacheRead(ORMBase):
     total_shares: int | None = None
     total_comments: int | None = None
     total_views: int | None = None
+    total_bookmarks: int | None = None
     avg_likes_per_post: float | None = None
     top_post_id: str | None = None
     growth_rate: float | None = None

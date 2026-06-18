@@ -16,6 +16,7 @@ class AnalyticsCache(Base):
     total_shares = Column(Integer)
     total_comments = Column(Integer)
     total_views = Column(Integer)
+    total_bookmarks = Column(Integer)
     avg_likes_per_post = Column(Float)
     top_post_id = Column(String(100))
     growth_rate = Column(Float)

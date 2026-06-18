@@ -109,6 +109,7 @@ CREATE TABLE analytics_cache (
         total_shares INTEGER,
         total_comments INTEGER,
         total_views INTEGER,
+        total_bookmarks INTEGER,
         avg_likes_per_post FLOAT,
         top_post_id VARCHAR(100),
         growth_rate FLOAT,
