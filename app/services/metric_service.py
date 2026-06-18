@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models import PipelineJob, Post, PostMetric
 from app.services.scraper_service import add_job_log, add_task_log
+from app.services.tier_service import metric_tier_from_metric, next_metric_update_at
 from app.services.tiktok_client import TikTokClient
 
 
@@ -44,25 +45,25 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
         info = await client.get_video_info(post.tiktok_url)
         stats = _stats_from_info(info)
         recorded_at = _now()
-        db.add(
-            PostMetric(
-                post_id=post.id,
-                likes_count=_to_int(stats.get("diggCount")),
-                shares_count=_to_int(stats.get("shareCount")),
-                comments_count=_to_int(stats.get("commentCount")),
-                views_count=_to_int(stats.get("playCount")),
-                bookmarks_count=_to_int(stats.get("collectCount")),
-                recorded_at=recorded_at,
-                job_id=job.id,
-            )
+        metric = PostMetric(
+            post_id=post.id,
+            likes_count=_to_int(stats.get("diggCount")),
+            shares_count=_to_int(stats.get("shareCount")),
+            comments_count=_to_int(stats.get("commentCount")),
+            views_count=_to_int(stats.get("playCount")),
+            bookmarks_count=_to_int(stats.get("collectCount")),
+            recorded_at=recorded_at,
+            job_id=job.id,
         )
+        db.add(metric)
         post.last_metric_update = recorded_at
+        post.metric_tier = metric_tier_from_metric(metric)
+        post.next_metric_update = next_metric_update_at(recorded_at)
         job.items_updated = 1
         job.status = "done"
         job.finished_at = recorded_at
         add_job_log(db, job, "Update metric xong")
         add_task_log(db, job)
-        # TODO: cap nhat metric_tier, velocity, next_metric_update.
         db.commit()
     except Exception as exc:
         job.status = "failed"

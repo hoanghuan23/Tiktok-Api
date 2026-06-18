@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models import Hashtag, PipelineJob, PipelineLog, Post, PostMetric, Source, TaskLog
+from app.services.tier_service import metric_tier_from_metric, next_metric_update_at, refresh_source_schedule
 from app.services.tiktok_client import TikTokClient
 
 
@@ -228,6 +229,8 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
             if metric:
                 db.add(metric)
                 post.last_metric_update = recorded_at
+                post.metric_tier = metric_tier_from_metric(metric)
+                post.next_metric_update = next_metric_update_at(recorded_at)
             posts_new += 1
 
         job.posts_found = len(videos)
@@ -237,9 +240,9 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
         job.status = "done"
         job.finished_at = _now()
         source.last_scraped = job.finished_at
+        refresh_source_schedule(db, source, job.finished_at)
         add_job_log(db, job, f"Crawl xong: found={len(videos)}, new={posts_new}")
         add_task_log(db, job)
-        # TODO: tinh next_scrape theo tier/schedule_override_minutes.
         db.commit()
     except Exception as exc:
         job.status = "failed"

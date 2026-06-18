@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -48,6 +48,8 @@ def test_update_post_metric_writes_task_log_summary(monkeypatch):
     task_log = db.query(TaskLog).one()
 
     assert job.status == "done"
+    assert post.metric_tier == "very_low"
+    assert post.next_metric_update == post.last_metric_update + timedelta(seconds=200)
     assert task_log.task_name == "update_metrics"
     assert task_log.status == "done"
     assert task_log.items_processed == 1

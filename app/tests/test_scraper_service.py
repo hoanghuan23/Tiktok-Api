@@ -80,6 +80,9 @@ def test_crawl_source_writes_task_log_summary(monkeypatch):
     task_log = db.query(TaskLog).one()
 
     assert job.status == "done"
+    assert source.last_scraped == job.finished_at
+    assert source.next_scrape is not None
+    assert source.schedule_tier == 1
     assert task_log.task_name == "scrape_posts"
     assert task_log.status == "done"
     assert task_log.started_at == job.started_at
@@ -175,6 +178,7 @@ def test_crawl_keyword_source_uses_keyword_search_like_hashtag(monkeypatch):
     assert post.tiktok_url == "https://www.tiktok.com/@search_author/video/video-kw-1"
     assert [hashtag.tag for hashtag in post.hashtags] == ["keyword"]
     assert metric.views_count == 100
+    assert post.metric_tier == "very_low"
 
 
 def test_crawl_source_saves_posted_at_from_video_as_dict_create_time(monkeypatch):
@@ -247,6 +251,8 @@ def test_crawl_source_creates_initial_post_metric_from_video_stats(monkeypatch):
     assert metric.bookmarks_count == 242
     assert metric.job_id == job.id
     assert post.last_metric_update == metric.recorded_at
+    assert post.metric_tier == "medium"
+    assert post.next_metric_update == metric.recorded_at + timedelta(seconds=200)
 
 
 def test_crawl_source_creates_hashtags_for_new_posts(monkeypatch):
