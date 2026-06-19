@@ -1,4 +1,5 @@
 import asyncio
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.database import SessionLocal
 from app.models import Post, Source
-from app.services.metric_service import update_post_metric
+from app.services.metric_service import update_source_metrics
 from app.services.scraper_service import crawl_source
 
 
@@ -83,13 +84,21 @@ async def run_scheduler_cycle(
         source_jobs.append(job.id)
 
     post_jobs = []
-    for post in due_posts(db, current_time, post_batch_size):
-        job = await update_post_metric(db, post)
+    posts_by_source: dict[int, list[Post]] = defaultdict(list)
+    due_post_batch = due_posts(db, current_time, post_batch_size)
+    for post in due_post_batch:
+        posts_by_source[post.source_id].append(post)
+
+    for source_id, posts in posts_by_source.items():
+        source = db.get(Source, source_id)
+        if source is None:
+            continue
+        job = await update_source_metrics(db, source, posts=posts, now=current_time)
         post_jobs.append(job.id)
 
     return {
         "sources_processed": len(source_jobs),
-        "posts_processed": len(post_jobs),
+        "posts_processed": len(due_post_batch),
         "posts_expired": posts_expired,
         "source_job_ids": source_jobs,
         "post_job_ids": post_jobs,

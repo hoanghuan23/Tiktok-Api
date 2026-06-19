@@ -6,3 +6,5 @@ pydantic
 pydantic-settings
 python-dotenv
 TikTokApi
+curl_cffi
+beautifulsoup4

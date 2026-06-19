@@ -6,13 +6,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/tiktok.db"
     ms_token: str | None = None
-    tiktok_headless: bool = True
+    tiktok_headless: bool = False
     tiktok_browser: str = "chromium"
     tiktok_sleep_after: int = 3
     scheduler_enabled: bool = True
-    scheduler_interval_seconds: int = 200
-    scheduler_source_batch_size: int = 20
-    scheduler_post_batch_size: int = 50
+    scheduler_interval_seconds: int = 120
+    scheduler_source_batch_size: int = 15
+    scheduler_post_batch_size: int = 30
+    metric_num_workers: int = 3
+    metric_max_retries: int = 3
+    metric_retry_delay_seconds: int = 10
+    metric_request_delay_seconds: float = 1
+    metric_timeout_seconds: int = 15
+    metric_impersonate: str = "chrome124"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

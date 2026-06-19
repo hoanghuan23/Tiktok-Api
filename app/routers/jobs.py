@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import PipelineJob, Post, Source
 from app.schemas.jobs import PipelineJobDetail, PipelineJobRead
-from app.services.metric_service import update_post_metric
+from app.services.metric_service import update_post_metric, update_source_metrics
 from app.services.scheduler_service import run_scheduler_cycle
 from app.services.scraper_service import crawl_source
 
@@ -33,6 +33,14 @@ async def update_metric_job(post_id: int, db: Session = Depends(get_db)) -> Pipe
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
     return await update_post_metric(db, post)
+
+
+@router.post("/sources/{source_id}/update-metric", response_model=PipelineJobRead)
+async def update_source_metric_job(source_id: int, db: Session = Depends(get_db)) -> PipelineJob:
+    source = db.get(Source, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Source not found")
+    return await update_source_metrics(db, source)
 
 
 @router.post("/scheduler/run")

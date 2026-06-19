@@ -184,13 +184,14 @@ def test_run_scheduler_cycle_processes_due_source_and_post_batches(monkeypatch):
         source_arg.next_scrape = now + timedelta(minutes=30)
         return SimpleNamespace(id=101)
 
-    async def fake_update_post_metric(db_arg, post_arg):
-        calls["posts"].append(post_arg.id)
-        post_arg.next_metric_update = now + timedelta(seconds=200)
+    async def fake_update_source_metrics(db_arg, source_arg, posts=None, now=None):
+        calls["posts"].append((source_arg.id, [post.id for post in posts], now))
+        for post in posts:
+            post.next_metric_update = now + timedelta(seconds=200)
         return SimpleNamespace(id=202)
 
     monkeypatch.setattr(scheduler_service, "crawl_source", fake_crawl_source)
-    monkeypatch.setattr(scheduler_service, "update_post_metric", fake_update_post_metric)
+    monkeypatch.setattr(scheduler_service, "update_source_metrics", fake_update_source_metrics)
 
     result = asyncio.run(
         scheduler_service.run_scheduler_cycle(db, now=now, source_limit=20, post_limit=50)
@@ -203,5 +204,61 @@ def test_run_scheduler_cycle_processes_due_source_and_post_batches(monkeypatch):
         "source_job_ids": [101],
         "post_job_ids": [202],
     }
-    assert calls == {"sources": [(source.id, 30)], "posts": [post.id]}
+    assert calls == {"sources": [(source.id, 30)], "posts": [(source.id, [post.id], now)]}
+    db.close()
+
+
+def test_run_scheduler_cycle_groups_due_posts_by_source(monkeypatch):
+    db = _session()
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    source_a = Source(source_type="user", identifier="a", is_active=True, next_scrape=now + timedelta(hours=1))
+    source_b = Source(source_type="user", identifier="b", is_active=True, next_scrape=now + timedelta(hours=1))
+    db.add_all([source_a, source_b])
+    db.flush()
+    posts = [
+        Post(
+            source_id=source_a.id,
+            tiktok_video_id="a-1",
+            tiktok_url="https://www.tiktok.com/@a/video/a-1",
+            posted_at=now,
+            is_tracked=True,
+            is_deleted=False,
+            next_metric_update=None,
+        ),
+        Post(
+            source_id=source_a.id,
+            tiktok_video_id="a-2",
+            tiktok_url="https://www.tiktok.com/@a/video/a-2",
+            posted_at=now,
+            is_tracked=True,
+            is_deleted=False,
+            next_metric_update=None,
+        ),
+        Post(
+            source_id=source_b.id,
+            tiktok_video_id="b-1",
+            tiktok_url="https://www.tiktok.com/@b/video/b-1",
+            posted_at=now,
+            is_tracked=True,
+            is_deleted=False,
+            next_metric_update=None,
+        ),
+    ]
+    db.add_all(posts)
+    db.commit()
+    calls = []
+
+    async def fake_update_source_metrics(db_arg, source_arg, posts=None, now=None):
+        calls.append((source_arg.id, [post.tiktok_video_id for post in posts]))
+        return SimpleNamespace(id=200 + len(calls))
+
+    monkeypatch.setattr(scheduler_service, "update_source_metrics", fake_update_source_metrics)
+
+    result = asyncio.run(
+        scheduler_service.run_scheduler_cycle(db, now=now, source_limit=0, post_limit=50)
+    )
+
+    assert result["posts_processed"] == 3
+    assert result["post_job_ids"] == [201, 202]
+    assert calls == [(source_a.id, ["a-1", "a-2"]), (source_b.id, ["b-1"])]
     db.close()
