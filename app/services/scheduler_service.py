@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import or_
@@ -36,6 +36,7 @@ def due_sources(db: Session, now: datetime, limit: int | None = None) -> list[So
 def due_posts(db: Session, now: datetime, limit: int | None = None) -> list[Post]:
     query = (
         db.query(Post)
+        .filter(Post.posted_at > now - timedelta(hours=24))
         .filter(or_(Post.is_tracked.is_(True), Post.is_tracked.is_(None)))
         .filter(or_(Post.is_deleted.is_(False), Post.is_deleted.is_(None)))
         .filter(or_(Post.next_metric_update.is_(None), Post.next_metric_update <= now))
@@ -51,6 +52,18 @@ def due_posts(db: Session, now: datetime, limit: int | None = None) -> list[Post
     return query.all()
 
 
+def expire_old_tracked_posts(db: Session, now: datetime) -> int:
+    expired_count = (
+        db.query(Post)
+        .filter(Post.posted_at <= now - timedelta(hours=24))
+        .filter(or_(Post.is_tracked.is_(True), Post.is_tracked.is_(None)))
+        .filter(or_(Post.is_deleted.is_(False), Post.is_deleted.is_(None)))
+        .update({Post.is_tracked: False}, synchronize_session=False)
+    )
+    db.commit()
+    return expired_count
+
+
 async def run_scheduler_cycle(
     db: Session,
     now: datetime | None = None,
@@ -62,6 +75,7 @@ async def run_scheduler_cycle(
     current_time = now or _now()
     source_batch_size = source_limit if source_limit is not None else settings.scheduler_source_batch_size
     post_batch_size = post_limit if post_limit is not None else settings.scheduler_post_batch_size
+    posts_expired = expire_old_tracked_posts(db, current_time)
 
     source_jobs = []
     for source in due_sources(db, current_time, source_batch_size):
@@ -76,6 +90,7 @@ async def run_scheduler_cycle(
     return {
         "sources_processed": len(source_jobs),
         "posts_processed": len(post_jobs),
+        "posts_expired": posts_expired,
         "source_job_ids": source_jobs,
         "post_job_ids": post_jobs,
     }

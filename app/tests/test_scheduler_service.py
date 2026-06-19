@@ -86,6 +86,74 @@ def test_due_posts_includes_null_next_metric_update_and_limits_batch():
     db.close()
 
 
+def test_due_posts_excludes_posts_older_than_24h():
+    db = _session()
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    source = Source(source_type="user", identifier="vtv24news", is_active=True)
+    db.add(source)
+    db.flush()
+    recent_post = Post(
+        source_id=source.id,
+        tiktok_video_id="recent",
+        tiktok_url="https://www.tiktok.com/@vtv24news/video/recent",
+        posted_at=now - timedelta(hours=23, minutes=59),
+        is_tracked=True,
+        is_deleted=False,
+        next_metric_update=None,
+    )
+    old_post = Post(
+        source_id=source.id,
+        tiktok_video_id="old",
+        tiktok_url="https://www.tiktok.com/@vtv24news/video/old",
+        posted_at=now - timedelta(hours=24, seconds=1),
+        is_tracked=True,
+        is_deleted=False,
+        next_metric_update=None,
+    )
+    db.add_all([recent_post, old_post])
+    db.commit()
+
+    posts = scheduler_service.due_posts(db, now)
+
+    assert [post.tiktok_video_id for post in posts] == ["recent"]
+    db.close()
+
+
+def test_expire_old_tracked_posts_marks_posts_untracked():
+    db = _session()
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    source = Source(source_type="user", identifier="vtv24news", is_active=True)
+    db.add(source)
+    db.flush()
+    recent_post = Post(
+        source_id=source.id,
+        tiktok_video_id="recent-expire",
+        tiktok_url="https://www.tiktok.com/@vtv24news/video/recent-expire",
+        posted_at=now - timedelta(hours=23, minutes=59),
+        is_tracked=True,
+        is_deleted=False,
+    )
+    old_post = Post(
+        source_id=source.id,
+        tiktok_video_id="old-expire",
+        tiktok_url="https://www.tiktok.com/@vtv24news/video/old-expire",
+        posted_at=now - timedelta(hours=24, seconds=1),
+        is_tracked=True,
+        is_deleted=False,
+    )
+    db.add_all([recent_post, old_post])
+    db.commit()
+
+    expired_count = scheduler_service.expire_old_tracked_posts(db, now)
+    db.refresh(recent_post)
+    db.refresh(old_post)
+
+    assert expired_count == 1
+    assert recent_post.is_tracked is True
+    assert old_post.is_tracked is False
+    db.close()
+
+
 def test_run_scheduler_cycle_processes_due_source_and_post_batches(monkeypatch):
     db = _session()
     now = datetime(2026, 1, 2, 12, 0, 0)
@@ -131,6 +199,7 @@ def test_run_scheduler_cycle_processes_due_source_and_post_batches(monkeypatch):
     assert result == {
         "sources_processed": 1,
         "posts_processed": 1,
+        "posts_expired": 0,
         "source_job_ids": [101],
         "post_job_ids": [202],
     }

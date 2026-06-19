@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import models
 from app.models import PipelineLog, Post, Source, TaskLog
+from app.services import metric_service
 from app.services.metric_service import update_post_metric
 from app.services.tiktok_client import TikTokClient
 
@@ -18,6 +19,8 @@ def _session():
 
 
 def test_update_post_metric_writes_task_log_summary(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+
     async def fake_get_video_info(self, url):
         return {
             "statsV2": {
@@ -29,6 +32,7 @@ def test_update_post_metric_writes_task_log_summary(monkeypatch):
             }
         }
 
+    monkeypatch.setattr(metric_service, "_now", lambda: now)
     monkeypatch.setattr(TikTokClient, "get_video_info", fake_get_video_info)
     db = _session()
     source = Source(source_type="user", identifier="vtv24news", is_active=True)
@@ -38,7 +42,7 @@ def test_update_post_metric_writes_task_log_summary(monkeypatch):
         source_id=source.id,
         tiktok_video_id="video-1",
         tiktok_url="https://www.tiktok.com/@vtv24news/video/video-1",
-        posted_at=datetime(2026, 1, 2, 11, 0, 0),
+        posted_at=now - timedelta(hours=1),
     )
     db.add(post)
     db.commit()
@@ -49,10 +53,46 @@ def test_update_post_metric_writes_task_log_summary(monkeypatch):
 
     assert job.status == "done"
     assert post.metric_tier == "very_low"
-    assert post.next_metric_update == post.last_metric_update + timedelta(seconds=200)
+    assert post.next_metric_update == metric_service.next_metric_update_at(post.last_metric_update)
     assert task_log.task_name == "update_metrics"
     assert task_log.status == "done"
     assert task_log.items_processed == 1
     assert task_log.errors_count == 0
     assert task_log.error_message is None
     assert db.query(PipelineLog).count() == 0
+
+
+def test_update_post_metric_skips_posts_older_than_24h(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+
+    async def fail_if_called(self, url):
+        raise AssertionError("Old posts should not request TikTok video info")
+
+    monkeypatch.setattr(metric_service, "_now", lambda: now)
+    monkeypatch.setattr(TikTokClient, "get_video_info", fail_if_called)
+    db = _session()
+    source = Source(source_type="user", identifier="vtv24news", is_active=True)
+    db.add(source)
+    db.flush()
+    post = Post(
+        source_id=source.id,
+        tiktok_video_id="video-old",
+        tiktok_url="https://www.tiktok.com/@vtv24news/video/video-old",
+        posted_at=now - timedelta(hours=24, seconds=1),
+        is_tracked=True,
+    )
+    db.add(post)
+    db.commit()
+    db.refresh(post)
+
+    job = asyncio.run(update_post_metric(db, post))
+    task_log = db.query(TaskLog).one()
+
+    assert job.status == "done"
+    assert job.items_total == 0
+    assert job.items_updated == 0
+    assert post.is_tracked is False
+    assert post.last_metric_update is None
+    assert len(post.metrics) == 0
+    assert task_log.task_name == "update_metrics"
+    assert task_log.items_processed == 0

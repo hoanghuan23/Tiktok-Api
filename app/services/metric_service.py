@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -26,7 +26,16 @@ def _stats_from_info(info: dict[str, Any]) -> dict[str, Any]:
     return info.get("statsV2") or info.get("stats") or {}
 
 
+def _is_post_older_than_24h(post: Post, now: datetime) -> bool:
+    posted_at = post.posted_at
+    if posted_at.tzinfo is not None:
+        posted_at = posted_at.astimezone(timezone.utc).replace(tzinfo=None)
+    return posted_at <= now - timedelta(hours=24)
+
+
 async def update_post_metric(db: Session, post: Post) -> PipelineJob:
+    started_at = _now()
+    should_skip = _is_post_older_than_24h(post, started_at)
     client = TikTokClient(db)
     session_record = client.get_session_record()
     job = PipelineJob(
@@ -34,12 +43,21 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
         source_id=post.source_id,
         session_id=session_record.id if session_record else None,
         status="running",
-        items_total=1,
-        started_at=_now(),
+        items_total=0 if should_skip else 1,
+        started_at=started_at,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
+
+    if should_skip:
+        post.is_tracked = False
+        job.status = "done"
+        job.finished_at = _now()
+        add_task_log(db, job)
+        db.commit()
+        db.refresh(job)
+        return job
 
     try:
         info = await client.get_video_info(post.tiktok_url)
