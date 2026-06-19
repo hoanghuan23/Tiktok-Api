@@ -32,6 +32,8 @@ def create_session(payload: TikTokSessionCreate, db: Session = Depends(get_db)) 
         )
 
     session = TikTokSession(
+        sessionid=payload.sessionid,
+        tt_csrf_token=payload.tt_csrf_token,
         ms_token=payload.ms_token,
         is_active=payload.is_active,
         is_valid=payload.is_valid,

@@ -6,6 +6,8 @@ from app.schemas.base import ORMBase
 
 
 class TikTokSessionCreate(ORMBase):
+    sessionid: str = Field(min_length=1)
+    tt_csrf_token: str = Field(min_length=1)
     ms_token: str = Field(min_length=1)
     is_active: bool = True
     is_valid: bool = True
@@ -14,6 +16,9 @@ class TikTokSessionCreate(ORMBase):
 
 
 class TikTokSessionUpdate(ORMBase):
+    sessionid: str | None = Field(default=None, min_length=1)
+    tt_csrf_token: str | None = Field(default=None, min_length=1)
+    ms_token: str | None = Field(default=None, min_length=1)
     is_active: bool | None = None
     is_valid: bool | None = None
     expires_at: datetime | None = None
@@ -21,6 +26,8 @@ class TikTokSessionUpdate(ORMBase):
 
 class TikTokSessionRead(ORMBase):
     id: int
+    masked_sessionid: str
+    masked_tt_csrf_token: str
     masked_ms_token: str
     is_active: bool
     is_valid: bool

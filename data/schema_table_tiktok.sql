@@ -18,6 +18,8 @@ CREATE INDEX idx_task_name_date ON task_logs (task_name, created_at);
 -- bảng tiktok_sessions lưu trữ thông tin phiên đăng nhập/cookie/device fingerprint của TikTok để quản lý truy cập dữ liệu
 CREATE TABLE tiktok_sessions (
         id INTEGER NOT NULL,
+        sessionid TEXT NOT NULL,
+        tt_csrf_token TEXT NOT NULL,
         ms_token TEXT NOT NULL,
         is_active BOOLEAN NOT NULL,
         is_valid BOOLEAN NOT NULL,
