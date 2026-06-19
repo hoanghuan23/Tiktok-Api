@@ -38,9 +38,10 @@ class TikTokClient:
         ms_token = self._get_ms_token()
         api = TikTokApi()
         session_kwargs = {
-            "num_sessions": 3,
+            "num_sessions": 1,
             "headless": self.settings.tiktok_headless,
             "browser": self.settings.tiktok_browser,
+            "override_browser_args": ["--mute-audio"],
             "sleep_after": self.settings.tiktok_sleep_after,
         }
         if ms_token:

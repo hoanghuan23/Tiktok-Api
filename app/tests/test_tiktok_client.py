@@ -477,6 +477,7 @@ async def test_create_api_passes_configured_session_options(monkeypatch):
         "num_sessions": 1,
         "headless": False,
         "browser": "chromium",
+        "override_browser_args": ["--mute-audio"],
         "sleep_after": 5,
         "ms_tokens": ["token-123"],
     }
