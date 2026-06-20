@@ -35,8 +35,9 @@ def extract_metrics_from_html(html: str) -> dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
     tag = soup.find("script", id="__UNIVERSAL_DATA_FOR_REHYDRATION__")
     if tag is None or not tag.string:
-        is_waf = "wafchallengeid" in html or "Please wait" in html
-        is_captcha = "captcha" in html.lower()
+        html_lower = html.lower()
+        is_waf = "wafchallengeid" in html_lower or "please wait" in html_lower
+        is_captcha = "captcha" in html_lower
         raise ValueError(
             "Khong co rehydration script. "
             f"waf={is_waf}, captcha={is_captcha}, html_len={len(html)}"
@@ -73,7 +74,22 @@ def _cookies_from_session(session_record: TikTokSession) -> dict[str, str]:
 def _is_retryable_metric_error(error: str | None) -> bool:
     if not error:
         return False
-    return "captcha=True" in error or "waf=True" in error
+    error = error.lower()
+    return any(
+        marker in error
+        for marker in ("captcha=true", "waf=true", "timeout", "connection")
+    )
+
+
+def _should_retry_metric_result(result: dict[str, Any]) -> bool:
+    """Return whether a failed request is worth retrying with the same session."""
+    if result.get("ok"):
+        return False
+
+    return (
+        _is_retryable_metric_error(result.get("error"))
+        or result.get("status_code") in {403, 408, 429, 500, 502, 503, 504}
+    )
 
 
 def due_posts_for_source(db: Session, source_id: int, now: datetime) -> list[Post]:
@@ -108,6 +124,7 @@ async def _fetch_one_metric(
                 "url": post.tiktok_url,
                 "worker": worker_id,
                 "ok": False,
+                "status_code": response.status_code,
                 "error": f"HTTP {response.status_code}",
             }
         return {
@@ -158,7 +175,7 @@ async def _metric_worker(
             )
             has_made_request = True
             for _attempt in range(settings.metric_max_retries):
-                if result["ok"] or not _is_retryable_metric_error(result.get("error")):
+                if not _should_retry_metric_result(result):
                     break
                 await asyncio.sleep(settings.metric_retry_delay_seconds)
                 result = await _fetch_one_metric(

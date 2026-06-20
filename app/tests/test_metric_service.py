@@ -117,6 +117,21 @@ def test_extract_metrics_from_html_reports_missing_script():
         raise AssertionError("Expected missing rehydration script to raise")
 
 
+def test_metric_retry_policy_retries_waf_network_and_transient_http_errors():
+    assert metric_service._should_retry_metric_result(
+        {"ok": False, "error": "Khong co script. waf=True"}
+    )
+    assert metric_service._should_retry_metric_result(
+        {"ok": False, "error": "Connection timed out"}
+    )
+    assert metric_service._should_retry_metric_result(
+        {"ok": False, "error": "HTTP 403", "status_code": 403}
+    )
+    assert not metric_service._should_retry_metric_result(
+        {"ok": False, "error": "HTTP 404", "status_code": 404}
+    )
+
+
 def test_update_post_metric_writes_task_log_summary(monkeypatch):
     now = datetime(2026, 1, 2, 12, 0, 0)
 
