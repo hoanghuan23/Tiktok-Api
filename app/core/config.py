@@ -13,11 +13,11 @@ class Settings(BaseSettings):
     scheduler_interval_seconds: int = 120
     scheduler_source_batch_size: int = 15
     scheduler_post_batch_size: int = 30
-    metric_num_workers: int = 3
+    metric_num_workers: int = 1
     metric_max_retries: int = 3
     metric_retry_delay_seconds: int = 10
     metric_request_delay_seconds: float = 1
-    metric_timeout_seconds: int = 15
+    metric_timeout_seconds: int = 8
     metric_impersonate: str = "chrome124"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
