@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -13,6 +14,8 @@ from app.services.scraper_service import add_job_log, add_task_log
 from app.services.tier_service import metric_tier_from_metric, next_metric_update_at
 from app.services.tiktok_client import TikTokClient
 
+
+logger = logging.getLogger("tiktok_api.metrics")
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -290,6 +293,7 @@ async def update_source_metrics(
     now: datetime | None = None,
 ) -> PipelineJob:
     started_at = now or _now()
+    source_name = source.display_name or source.identifier
     client = TikTokClient(db)
     session_record = client.get_session_record()
     update_posts = list(posts) if posts is not None else due_posts_for_source(db, source.id, started_at)
@@ -301,6 +305,14 @@ async def update_source_metrics(
             skipped_old += 1
         else:
             active_posts.append(post)
+
+    logger.info(
+        "Bat dau cap nhat metrics | source=%s id=%s posts=%s skipped_old=%s",
+        source_name,
+        source.id,
+        len(active_posts),
+        skipped_old,
+    )
 
     job = PipelineJob(
         job_type="update_metric",
@@ -321,6 +333,7 @@ async def update_source_metrics(
         add_task_log(db, job)
         db.commit()
         db.refresh(job)
+        logger.info("Bo qua cap nhat metrics | source=%s id=%s khong co post den han", source_name, source.id)
         return job
 
     if session_record is None:
@@ -332,6 +345,7 @@ async def update_source_metrics(
         add_task_log(db, job)
         db.commit()
         db.refresh(job)
+        logger.error("Cap nhat metrics that bai | source=%s id=%s error=%s", source_name, source.id, job.error_message)
         return job
 
     results = await _fetch_metric_results(active_posts, session_record)
@@ -375,4 +389,11 @@ async def update_source_metrics(
     add_task_log(db, job)
     db.commit()
     db.refresh(job)
+    logger.info(
+        "Hoan tat cap nhat metrics | source=%s id=%s updated=%s failed=%s",
+        source_name,
+        source.id,
+        job.items_updated,
+        job.items_failed,
+    )
     return job

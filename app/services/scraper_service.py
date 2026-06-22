@@ -1,4 +1,5 @@
 import re
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -10,6 +11,7 @@ from app.services.tiktok_client import TikTokClient
 
 
 _HASHTAG_RE = re.compile(r"(?<!\w)#(\w+)", re.UNICODE)
+logger = logging.getLogger("tiktok_api.scraper")
 
 
 def _now() -> datetime:
@@ -202,6 +204,14 @@ def add_task_log(db: Session, job: PipelineJob) -> None:
 
 
 async def crawl_source(db: Session, source: Source, max_count: int = 30) -> PipelineJob:
+    source_name = source.display_name or source.identifier
+    logger.info(
+        "Bat dau scrape bai moi | source=%s id=%s type=%s max_count=%s",
+        source_name,
+        source.id,
+        source.source_type,
+        max_count,
+    )
     client = TikTokClient(db)
     session_record = client.get_session_record()
     job = PipelineJob(
@@ -274,6 +284,14 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
         refresh_source_schedule(db, source, job.finished_at)
         add_task_log(db, job)
         db.commit()
+        logger.info(
+            "Hoan tat scrape bai moi | source=%s id=%s found=%s new=%s failed=%s",
+            source_name,
+            source.id,
+            job.posts_found,
+            job.posts_new,
+            job.items_failed,
+        )
     except Exception as exc:
         job.status = "failed"
         job.error_message = str(exc)
@@ -282,6 +300,12 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
         add_job_log(db, job, "Crawl source that bai", "ERROR", type(exc).__name__, str(exc))
         add_task_log(db, job)
         db.commit()
+        logger.error(
+            "Scrape bai moi that bai | source=%s id=%s error=%s",
+            source_name,
+            source.id,
+            exc,
+        )
 
     db.refresh(job)
     return job

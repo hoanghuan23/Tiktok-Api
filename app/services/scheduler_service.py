@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -14,6 +15,7 @@ from app.services.scraper_service import crawl_source
 
 
 SUPPORTED_SOURCE_TYPES = ("user", "hashtag", "keyword")
+logger = logging.getLogger("tiktok_api.scheduler")
 
 
 def _now() -> datetime:
@@ -79,7 +81,10 @@ async def run_scheduler_cycle(
     posts_expired = expire_old_tracked_posts(db, current_time)
 
     source_jobs = []
-    for source in due_sources(db, current_time, source_batch_size):
+    due_source_batch = due_sources(db, current_time, source_batch_size)
+    if due_source_batch:
+        logger.info("Scheduler bat dau scrape bai moi | sources_due=%s", len(due_source_batch))
+    for source in due_source_batch:
         job = await crawl_source(db, source, max_count=max_count)
         source_jobs.append(job.id)
 
@@ -96,6 +101,14 @@ async def run_scheduler_cycle(
         job = await update_source_metrics(db, source, posts=posts, now=current_time)
         post_jobs.append(job.id)
 
+    if source_jobs or post_jobs or posts_expired:
+        logger.info(
+            "Scheduler hoan tat chu ky | sources_processed=%s posts_processed=%s posts_expired=%s",
+            len(source_jobs),
+            len(due_post_batch),
+            posts_expired,
+        )
+
     return {
         "sources_processed": len(source_jobs),
         "posts_processed": len(due_post_batch),
@@ -107,6 +120,7 @@ async def run_scheduler_cycle(
 
 async def run_scheduler_forever() -> None:
     settings = get_settings()
+    logger.info("Scheduler da bat dau | interval_seconds=%s", settings.scheduler_interval_seconds)
     while True:
         await asyncio.sleep(settings.scheduler_interval_seconds)
         db = SessionLocal()
