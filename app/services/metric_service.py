@@ -30,10 +30,6 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
-def _stats_from_info(info: dict[str, Any]) -> dict[str, Any]:
-    return info.get("statsV2") or info.get("stats") or {}
-
-
 def extract_metrics_from_html(html: str) -> dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
     tag = soup.find("script", id="__UNIVERSAL_DATA_FOR_REHYDRATION__")
@@ -67,20 +63,13 @@ def _is_post_older_than_24h(post: Post, now: datetime) -> bool:
     return posted_at <= now - timedelta(hours=24)
 
 
-def _cookies_from_session(session_record: TikTokSession) -> dict[str, str]:
-    return {
-        "sessionid": session_record.sessionid,
-        "tt_csrf_token": session_record.tt_csrf_token,
-    }
-
-
 def _is_retryable_metric_error(error: str | None) -> bool:
     if not error:
         return False
     error = error.lower()
     return any(
         marker in error
-        for marker in ("captcha=true", "waf=true", "timeout", "connection")
+        for marker in ("captcha=true", "waf=true", "timeout", "connection", "403", "forbidden")
     )
 
 
@@ -114,28 +103,26 @@ def due_posts_for_source(db: Session, source_id: int, now: datetime) -> list[Pos
 
 
 async def _fetch_one_metric(
-    session: Any,
     post: Post,
     worker_id: int,
     timeout: int,
 ) -> dict[str, Any]:
     try:
-        response = await session.get(post.tiktok_url, timeout=timeout, allow_redirects=True)
-        if response.status_code != 200:
+        metrics = await asyncio.to_thread(extract_tiktok_video_metrics, post.tiktok_url, timeout)
+        if metrics is None:
             return {
                 "post_id": post.id,
                 "url": post.tiktok_url,
                 "worker": worker_id,
                 "ok": False,
-                "status_code": response.status_code,
-                "error": f"HTTP {response.status_code}",
+                "error": "yt-dlp khong lay duoc metric",
             }
         return {
             "post_id": post.id,
             "url": post.tiktok_url,
             "worker": worker_id,
             "ok": True,
-            "metrics": extract_metrics_from_html(response.text),
+            "metrics": metrics,
         }
     except Exception as exc:
         return {
@@ -147,47 +134,76 @@ async def _fetch_one_metric(
         }
 
 
+def extract_tiktok_video_metrics(video_url: str, timeout: int | None = None) -> dict[str, Any] | None:
+    from yt_dlp import YoutubeDL
+
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "extract_flat": False,
+        "ignoreerrors": False,
+        "noplaylist": True,
+        "no_warnings": True,
+    }
+    if timeout is not None:
+        ydl_opts["socket_timeout"] = timeout
+
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            item = ydl.extract_info(video_url, download=False)
+    except Exception as exc:
+        logger.warning("yt-dlp khong lay duoc metric | url=%s error=%s", video_url, exc)
+        return None
+
+    if not item:
+        return None
+
+    share_count = item.get("repost_count")
+    if share_count is None:
+        share_count = item.get("share_count")
+
+    return {
+        "likes_count": _to_int(item.get("like_count")),
+        "shares_count": _to_int(share_count),
+        "comments_count": _to_int(item.get("comment_count")),
+        "views_count": _to_int(item.get("view_count")),
+        "bookmarks_count": _to_int(item.get("save_count")),
+    }
+
+
 async def _metric_worker(
     worker_id: int,
     queue: asyncio.Queue[Post],
     results: list[dict[str, Any]],
-    session_record: TikTokSession,
+    _session_record: TikTokSession | None,
 ) -> None:
-    from curl_cffi.requests import AsyncSession
-
     settings = get_settings()
-    async with AsyncSession(
-        impersonate=settings.metric_impersonate,
-        cookies=_cookies_from_session(session_record),
-    ) as session:
-        has_made_request = False
-        while True:
-            try:
-                post = queue.get_nowait()
-            except asyncio.QueueEmpty:
+    has_made_request = False
+    while True:
+        try:
+            post = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+
+        if has_made_request and settings.metric_request_delay_seconds > 0:
+            await asyncio.sleep(settings.metric_request_delay_seconds)
+
+        result = await _fetch_one_metric(
+            post,
+            worker_id,
+            settings.metric_timeout_seconds,
+        )
+        has_made_request = True
+        for _attempt in range(settings.metric_max_retries):
+            if not _should_retry_metric_result(result):
                 break
-
-            if has_made_request and settings.metric_request_delay_seconds > 0:
-                await asyncio.sleep(settings.metric_request_delay_seconds)
-
+            await asyncio.sleep(settings.metric_retry_delay_seconds)
             result = await _fetch_one_metric(
-                session,
                 post,
                 worker_id,
                 settings.metric_timeout_seconds,
             )
-            has_made_request = True
-            for _attempt in range(settings.metric_max_retries):
-                if not _should_retry_metric_result(result):
-                    break
-                await asyncio.sleep(settings.metric_retry_delay_seconds)
-                result = await _fetch_one_metric(
-                    session,
-                    post,
-                    worker_id,
-                    settings.metric_timeout_seconds,
-                )
-            results.append(result)
+        results.append(result)
 
 
 async def _fetch_metric_results(
@@ -251,16 +267,21 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
         return job
 
     try:
-        info = await client.get_video_info(post.tiktok_url)
-        stats = _stats_from_info(info)
+        metrics = await asyncio.to_thread(
+            extract_tiktok_video_metrics,
+            post.tiktok_url,
+            get_settings().metric_timeout_seconds,
+        )
+        if metrics is None:
+            raise ValueError("yt-dlp khong lay duoc metric")
         recorded_at = _now()
         metric = PostMetric(
             post_id=post.id,
-            likes_count=_to_int(stats.get("diggCount")),
-            shares_count=_to_int(stats.get("shareCount")),
-            comments_count=_to_int(stats.get("commentCount")),
-            views_count=_to_int(stats.get("playCount")),
-            bookmarks_count=_to_int(stats.get("collectCount")),
+            likes_count=metrics.get("likes_count"),
+            shares_count=metrics.get("shares_count"),
+            comments_count=metrics.get("comments_count"),
+            views_count=metrics.get("views_count"),
+            bookmarks_count=metrics.get("bookmarks_count"),
             recorded_at=recorded_at,
             job_id=job.id,
         )
@@ -334,18 +355,6 @@ async def update_source_metrics(
         db.commit()
         db.refresh(job)
         logger.info("Bo qua cap nhat metrics | source=%s id=%s khong co post den han", source_name, source.id)
-        return job
-
-    if session_record is None:
-        job.status = "failed"
-        job.items_failed = len(active_posts) + skipped_old
-        job.error_message = "Khong co TikTok session active/valid"
-        job.finished_at = _now()
-        add_job_log(db, job, "Update metric that bai", "ERROR", "MissingTikTokSession", job.error_message)
-        add_task_log(db, job)
-        db.commit()
-        db.refresh(job)
-        logger.error("Cap nhat metrics that bai | source=%s id=%s error=%s", source_name, source.id, job.error_message)
         return job
 
     results = await _fetch_metric_results(active_posts, session_record)

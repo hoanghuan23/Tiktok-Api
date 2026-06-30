@@ -2,7 +2,7 @@ import asyncio
 import json
 import sys
 from datetime import datetime, timedelta
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -11,7 +11,6 @@ from app import models
 from app.models import PipelineLog, Post, PostMetric, Source, TaskLog, TikTokSession
 from app.services import metric_service
 from app.services.metric_service import extract_metrics_from_html, update_post_metric, update_source_metrics
-from app.services.tiktok_client import TikTokClient
 
 
 def _session():
@@ -127,27 +126,90 @@ def test_metric_retry_policy_retries_waf_network_and_transient_http_errors():
     assert metric_service._should_retry_metric_result(
         {"ok": False, "error": "HTTP 403", "status_code": 403}
     )
+    assert metric_service._should_retry_metric_result(
+        {"ok": False, "error": "TikTok returned Forbidden"}
+    )
     assert not metric_service._should_retry_metric_result(
         {"ok": False, "error": "HTTP 404", "status_code": 404}
     )
 
 
+def test_extract_tiktok_video_metrics_uses_yt_dlp_counts(monkeypatch):
+    calls = []
+
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            self.opts = opts
+            calls.append(("init", opts))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            calls.append(("extract_info", url, download))
+            return {
+                "like_count": "10",
+                "repost_count": "2",
+                "comment_count": "1",
+                "view_count": "100",
+                "save_count": "3",
+            }
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+
+    metrics = metric_service.extract_tiktok_video_metrics(
+        "https://www.tiktok.com/@vtv24news/video/video-1",
+        timeout=8,
+    )
+
+    assert metrics == {
+        "likes_count": 10,
+        "shares_count": 2,
+        "comments_count": 1,
+        "views_count": 100,
+        "bookmarks_count": 3,
+    }
+    assert calls[0][1]["socket_timeout"] == 8
+
+
+def test_extract_tiktok_video_metrics_falls_back_to_share_count(monkeypatch):
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            return {"share_count": "5"}
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+
+    metrics = metric_service.extract_tiktok_video_metrics("https://www.tiktok.com/@u/video/1")
+
+    assert metrics["shares_count"] == 5
+
+
 def test_update_post_metric_writes_task_log_summary(monkeypatch):
     now = datetime(2026, 1, 2, 12, 0, 0)
 
-    async def fake_get_video_info(self, url):
+    def fake_extract_tiktok_video_metrics(url, timeout=None):
         return {
-            "statsV2": {
-                "diggCount": "10",
-                "shareCount": "2",
-                "commentCount": "1",
-                "playCount": "100",
-                "collectCount": "3",
-            }
+            "likes_count": 10,
+            "shares_count": 2,
+            "comments_count": 1,
+            "views_count": 100,
+            "bookmarks_count": 3,
         }
 
     monkeypatch.setattr(metric_service, "_now", lambda: now)
-    monkeypatch.setattr(TikTokClient, "get_video_info", fake_get_video_info)
+    monkeypatch.setattr(metric_service, "extract_tiktok_video_metrics", fake_extract_tiktok_video_metrics)
     db = _session()
     source = Source(source_type="user", identifier="vtv24news", is_active=True)
     db.add(source)
@@ -179,11 +241,11 @@ def test_update_post_metric_writes_task_log_summary(monkeypatch):
 def test_update_post_metric_skips_posts_older_than_24h(monkeypatch):
     now = datetime(2026, 1, 2, 12, 0, 0)
 
-    async def fail_if_called(self, url):
+    def fail_if_called(url, timeout=None):
         raise AssertionError("Old posts should not request TikTok video info")
 
     monkeypatch.setattr(metric_service, "_now", lambda: now)
-    monkeypatch.setattr(TikTokClient, "get_video_info", fail_if_called)
+    monkeypatch.setattr(metric_service, "extract_tiktok_video_metrics", fail_if_called)
     db = _session()
     source = Source(source_type="user", identifier="vtv24news", is_active=True)
     db.add(source)
@@ -318,24 +380,38 @@ def test_update_source_metrics_with_no_due_posts_does_not_fetch(monkeypatch):
     assert db.query(PostMetric).count() == 0
 
 
-def test_update_source_metrics_fails_without_active_session(monkeypatch):
+def test_update_source_metrics_does_not_require_active_session(monkeypatch):
     now = datetime(2026, 1, 2, 12, 0, 0)
     monkeypatch.setattr(metric_service, "_now", lambda: now)
     db = _session()
-    source, _posts = _source_with_posts(db, now, count=1)
+    source, posts = _source_with_posts(db, now, count=1)
 
-    async def fail_if_called(posts_arg, session_record):
-        raise AssertionError("Missing session should stop before fetch")
+    async def fake_fetch_metric_results(posts_arg, session_record):
+        assert session_record is None
+        return [
+            {
+                "post_id": posts[0].id,
+                "url": posts[0].tiktok_url,
+                "ok": True,
+                "metrics": {
+                    "views_count": 100,
+                    "likes_count": 10,
+                    "comments_count": 1,
+                    "shares_count": 2,
+                    "bookmarks_count": 3,
+                },
+            }
+        ]
 
-    monkeypatch.setattr(metric_service, "_fetch_metric_results", fail_if_called)
+    monkeypatch.setattr(metric_service, "_fetch_metric_results", fake_fetch_metric_results)
 
     job = asyncio.run(update_source_metrics(db, source))
 
-    assert job.status == "failed"
+    assert job.status == "done"
     assert job.items_total == 1
-    assert job.items_failed == 1
-    assert "session" in job.error_message.lower()
-    assert db.query(PostMetric).count() == 0
+    assert job.items_updated == 1
+    assert job.items_failed == 0
+    assert db.query(PostMetric).count() == 1
 
 
 def test_update_source_metrics_marks_old_passed_posts_untracked(monkeypatch):
@@ -362,22 +438,6 @@ def test_update_source_metrics_marks_old_passed_posts_untracked(monkeypatch):
 
 
 def test_metric_worker_delays_between_posts_in_same_worker(monkeypatch):
-    class FakeAsyncSession:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-    curl_package = ModuleType("curl_cffi")
-    requests_module = ModuleType("curl_cffi.requests")
-    requests_module.AsyncSession = FakeAsyncSession
-    curl_package.requests = requests_module
-    monkeypatch.setitem(sys.modules, "curl_cffi", curl_package)
-    monkeypatch.setitem(sys.modules, "curl_cffi.requests", requests_module)
     monkeypatch.setattr(
         metric_service,
         "get_settings",
@@ -393,7 +453,7 @@ def test_metric_worker_delays_between_posts_in_same_worker(monkeypatch):
     fetch_calls = []
     sleep_calls = []
 
-    async def fake_fetch_one_metric(session, post, worker_id, timeout):
+    async def fake_fetch_one_metric(post, worker_id, timeout):
         fetch_calls.append(post.id)
         return {
             "post_id": post.id,
