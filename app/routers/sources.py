@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Source
 from app.schemas.sources import SourceCreate, SourceRead, SourceUpdate
+from app.services.scraper_service import crawl_source_with_videos
 from app.services.tiktok_client import TikTokClient
 
 
@@ -36,17 +37,30 @@ def _source_identifier(source_type: str, identifier: str) -> str:
 @router.post("", response_model=SourceRead, status_code=status.HTTP_201_CREATED)
 async def create_source(payload: SourceCreate, db: Session = Depends(get_db)) -> Source:
     # TODO: DB chua co cot include_comments, tam thoi chi nhan request field nay.
-    identifier = _source_identifier(payload.source_type, payload.identifier)
-    follower_count = None
+    videos = []
     if payload.source_type == "user":
-        follower_count = await TikTokClient(db).get_user_follower_count(identifier)
+        max_days_old = payload.max_days_old if payload.max_days_old is not None else 1
+        since = _now() - timedelta(days=max(max_days_old, 0))
+        try:
+            identifier, videos = await TikTokClient(db).get_user_profile_videos(
+                payload.tiktok_url.strip(),
+                max_count=30,
+                since=since,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Khong the crawl TikTok URL: {exc}") from exc
+        if not identifier:
+            raise HTTPException(status_code=400, detail="Khong lay duoc identifier tu yt_dlp uploader")
+        tiktok_url = payload.tiktok_url.strip()
+    else:
+        identifier = _source_identifier(payload.source_type, payload.identifier or "")
+        tiktok_url = _source_url(payload.source_type, identifier)
 
     source = Source(
         source_type=payload.source_type,
         identifier=identifier,
         display_name=payload.display_name,
-        tiktok_url=_source_url(payload.source_type, identifier),
-        follower_count=follower_count,
+        tiktok_url=tiktok_url,
         is_active=True,
         max_days_old=payload.max_days_old,
         is_accessible=True,
@@ -59,6 +73,9 @@ async def create_source(payload: SourceCreate, db: Session = Depends(get_db)) ->
         db.rollback()
         raise HTTPException(status_code=400, detail="Source da ton tai") from exc
     db.refresh(source)
+    if payload.source_type == "user":
+        crawl_source_with_videos(db, source, videos)
+        db.refresh(source)
     return source
 
 

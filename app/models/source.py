@@ -13,7 +13,6 @@ class Source(Base):
     identifier = Column(String(100), nullable=False)
     display_name = Column(String(255))
     tiktok_url = Column(String(255))
-    follower_count = Column(Integer)
     is_active = Column(Boolean)
     max_days_old = Column(Integer)
     is_accessible = Column(Boolean)

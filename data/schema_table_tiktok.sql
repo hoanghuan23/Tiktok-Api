@@ -36,7 +36,6 @@ CREATE TABLE sources (
         identifier VARCHAR(100) NOT NULL,
         display_name VARCHAR(255),
         tiktok_url VARCHAR(255),
-        follower_count INTEGER,
         is_active BOOLEAN,
         
         max_days_old INTEGER,

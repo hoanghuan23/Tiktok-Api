@@ -18,12 +18,13 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _user_video_cutoff() -> datetime:
-    return _now() - timedelta(hours=24)
+def _user_video_cutoff(source: Source | None = None) -> datetime:
+    max_days_old = source.max_days_old if source and source.max_days_old is not None else 1
+    return _now() - timedelta(days=max(max_days_old, 0))
 
 
 def _user_video_since(db: Session, source: Source, latest_posted_at: datetime | None = None) -> datetime:
-    cutoff = _user_video_cutoff()
+    cutoff = _user_video_cutoff(source)
     if latest_posted_at is None:
         latest_posted_at = _latest_posted_at_for_source(db, source)
     if latest_posted_at is None:
@@ -203,15 +204,7 @@ def add_task_log(db: Session, job: PipelineJob) -> None:
     )
 
 
-async def crawl_source(db: Session, source: Source, max_count: int = 30) -> PipelineJob:
-    source_name = source.display_name or source.identifier
-    logger.info(
-        "Bat dau scrape bai moi | source=%s id=%s type=%s max_count=%s",
-        source_name,
-        source.id,
-        source.source_type,
-        max_count,
-    )
+def _create_scraper_job(db: Session, source: Source) -> PipelineJob:
     client = TikTokClient(db)
     session_record = client.get_session_record()
     job = PipelineJob(
@@ -224,6 +217,124 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
     db.add(job)
     db.commit()
     db.refresh(job)
+    return job
+
+
+def _complete_crawl_job(
+    db: Session,
+    source: Source,
+    job: PipelineJob,
+    videos: list[Any],
+    latest_posted_at: datetime | None = None,
+) -> None:
+    posts_new = 0
+    items_total = 0
+    for video in videos:
+        tiktok_video_id = _video_id(video)
+        if not tiktok_video_id:
+            items_total += 1
+            job.items_failed += 1
+            continue
+
+        create_time = TikTokClient.video_create_time(video)
+        if latest_posted_at is not None and create_time is not None and create_time <= latest_posted_at:
+            break
+
+        items_total += 1
+        exists = db.query(Post).filter(Post.tiktok_video_id == tiktok_video_id).first()
+        if exists:
+            continue
+
+        post = _video_to_post(source.id, video)
+        db.add(post)
+        db.flush()
+        _attach_post_hashtags(db, post)
+
+        recorded_at = _now()
+        metric = _video_to_metric(post, video, job.id, recorded_at)
+        if metric:
+            db.add(metric)
+            post.last_metric_update = recorded_at
+            post.metric_tier = metric_tier_from_metric(metric)
+            post.next_metric_update = next_metric_update_at(recorded_at)
+        posts_new += 1
+
+    job.posts_found = items_total
+    job.posts_new = posts_new
+    job.items_total = items_total
+    job.items_updated = posts_new
+    job.status = "done"
+    job.finished_at = _now()
+    source.last_scraped = job.finished_at
+    refresh_source_schedule(db, source, job.finished_at)
+    add_task_log(db, job)
+    db.commit()
+
+
+def _fail_crawl_job(
+    db: Session,
+    source: Source,
+    job: PipelineJob,
+    exc: Exception,
+) -> None:
+    job.status = "failed"
+    job.error_message = str(exc)
+    job.items_failed = max(job.items_failed, 1)
+    job.finished_at = _now()
+    add_job_log(db, job, "Crawl source that bai", "ERROR", type(exc).__name__, str(exc))
+    add_task_log(db, job)
+    db.commit()
+
+
+def crawl_source_with_videos(
+    db: Session,
+    source: Source,
+    videos: list[Any],
+    latest_posted_at: datetime | None = None,
+) -> PipelineJob:
+    source_name = source.display_name or source.identifier
+    logger.info(
+        "Bat dau luu bai moi da crawl | source=%s id=%s type=%s count=%s",
+        source_name,
+        source.id,
+        source.source_type,
+        len(videos),
+    )
+    job = _create_scraper_job(db, source)
+    try:
+        _complete_crawl_job(db, source, job, videos, latest_posted_at)
+        logger.info(
+            "Hoan tat luu bai moi da crawl | source=%s id=%s found=%s new=%s failed=%s",
+            source_name,
+            source.id,
+            job.posts_found,
+            job.posts_new,
+            job.items_failed,
+        )
+    except Exception as exc:
+        _fail_crawl_job(db, source, job, exc)
+        logger.error(
+            "Luu bai moi da crawl that bai | source=%s id=%s error=%s",
+            source_name,
+            source.id,
+            exc,
+        )
+
+    db.refresh(job)
+    return job
+
+
+async def crawl_source(db: Session, source: Source, max_count: int = 30) -> PipelineJob:
+    source_name = source.display_name or source.identifier
+    logger.info(
+        "Bat dau scrape bai moi | source=%s id=%s type=%s max_count=%s",
+        source_name,
+        source.id,
+        source.source_type,
+        max_count,
+    )
+    client = TikTokClient(db)
+    job = _create_scraper_job(db, source)
 
     try:
         latest_posted_at = None
@@ -242,48 +353,7 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
             # TODO: bo sung crawler cho sound.
             raise ValueError(f"Chua ho tro crawl source_type={source.source_type}")
 
-        posts_new = 0
-        items_total = 0
-        for video in videos:
-            tiktok_video_id = _video_id(video)
-            if not tiktok_video_id:
-                items_total += 1
-                job.items_failed += 1
-                continue
-
-            create_time = TikTokClient.video_create_time(video)
-            if latest_posted_at is not None and create_time is not None and create_time <= latest_posted_at:
-                break
-
-            items_total += 1
-            exists = db.query(Post).filter(Post.tiktok_video_id == tiktok_video_id).first()
-            if exists:
-                continue
-
-            post = _video_to_post(source.id, video)
-            db.add(post)
-            db.flush()
-            _attach_post_hashtags(db, post)
-
-            recorded_at = _now()
-            metric = _video_to_metric(post, video, job.id, recorded_at)
-            if metric:
-                db.add(metric)
-                post.last_metric_update = recorded_at
-                post.metric_tier = metric_tier_from_metric(metric)
-                post.next_metric_update = next_metric_update_at(recorded_at)
-            posts_new += 1
-
-        job.posts_found = items_total
-        job.posts_new = posts_new
-        job.items_total = items_total
-        job.items_updated = posts_new
-        job.status = "done"
-        job.finished_at = _now()
-        source.last_scraped = job.finished_at
-        refresh_source_schedule(db, source, job.finished_at)
-        add_task_log(db, job)
-        db.commit()
+        _complete_crawl_job(db, source, job, videos, latest_posted_at)
         logger.info(
             "Hoan tat scrape bai moi | source=%s id=%s found=%s new=%s failed=%s",
             source_name,
@@ -293,13 +363,7 @@ async def crawl_source(db: Session, source: Source, max_count: int = 30) -> Pipe
             job.items_failed,
         )
     except Exception as exc:
-        job.status = "failed"
-        job.error_message = str(exc)
-        job.items_failed = max(job.items_failed, 1)
-        job.finished_at = _now()
-        add_job_log(db, job, "Crawl source that bai", "ERROR", type(exc).__name__, str(exc))
-        add_task_log(db, job)
-        db.commit()
+        _fail_crawl_job(db, source, job, exc)
         logger.error(
             "Scrape bai moi that bai | source=%s id=%s error=%s",
             source_name,

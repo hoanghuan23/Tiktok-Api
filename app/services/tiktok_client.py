@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import desc
@@ -116,52 +117,129 @@ class TikTokClient:
             : cls.MAX_TOP_RECENT_VIDEOS
         ]
 
+    @staticmethod
+    def _normalize_yt_dlp_video(item: dict[str, Any]) -> Any:
+        video_id = item.get("id")
+        url = item.get("webpage_url") or item.get("url")
+        description = item.get("description") or item.get("title")
+        uploader = item.get("uploader")
+        thumbnail = item.get("thumbnail")
+        duration = item.get("duration")
+        timestamp = item.get("timestamp")
+        share_count = item.get("repost_count")
+        if share_count is None:
+            share_count = item.get("share_count")
+
+        return SimpleNamespace(
+            id=str(video_id) if video_id else None,
+            as_dict={
+                "id": str(video_id) if video_id else None,
+                "webVideoUrl": url,
+                "desc": description,
+                "createTime": timestamp,
+                "author": {"uniqueId": uploader} if uploader else None,
+                "video": {
+                    "duration": duration,
+                    "cover": thumbnail,
+                    "originCover": thumbnail,
+                },
+                "statsV2": {
+                    "diggCount": item.get("like_count"),
+                    "shareCount": share_count,
+                    "commentCount": item.get("comment_count"),
+                    "playCount": item.get("view_count"),
+                    "collectCount": item.get("save_count"),
+                },
+            },
+        )
+
+    @staticmethod
+    def _yt_dlp_options(max_count: int) -> dict[str, Any]:
+        return {
+            "quiet": True,
+            "skip_download": True,
+            "extract_flat": False,
+            "playlistend": max_count,
+            "ignoreerrors": True,
+            "noplaylist": False,
+            "no_warnings": True,
+        }
+
+    @staticmethod
+    def _yt_dlp_identifier(entries: list[dict[str, Any] | None]) -> str | None:
+        for item in entries:
+            if not item:
+                continue
+            uploader = item.get("uploader")
+            if uploader:
+                return str(uploader).lstrip("@")
+        return None
+
+    @classmethod
+    def _normalize_yt_dlp_entries(
+        cls,
+        entries: list[dict[str, Any] | None],
+        max_count: int,
+        since: datetime | None = None,
+    ) -> list[Any]:
+        cutoff_time = (
+            cls._comparable_datetime(since)
+            if since is not None
+            else (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
+        )
+        videos = []
+        for item in entries:
+            if not item:
+                continue
+
+            timestamp = item.get("timestamp")
+            if timestamp is None:
+                continue
+
+            create_time = datetime.fromtimestamp(float(timestamp), timezone.utc).replace(tzinfo=None)
+            if create_time <= cutoff_time:
+                break
+
+            videos.append(cls._normalize_yt_dlp_video(item))
+            if len(videos) >= max_count:
+                break
+
+        return videos
+
+    async def get_user_profile_videos(
+        self,
+        profile_url: str,
+        max_count: int,
+        since: datetime | None = None,
+    ) -> tuple[str | None, list[Any]]:
+        from yt_dlp import YoutubeDL
+
+        with YoutubeDL(self._yt_dlp_options(max_count)) as ydl:
+            result = ydl.extract_info(profile_url, download=False) or {}
+
+        entries = result.get("entries") or []
+        return (
+            self._yt_dlp_identifier(entries),
+            self._normalize_yt_dlp_entries(entries, max_count, since),
+        )
+
+    async def get_user_videos_by_url(
+        self,
+        profile_url: str,
+        max_count: int,
+        since: datetime | None = None,
+    ) -> list[Any]:
+        _, videos = await self.get_user_profile_videos(profile_url, max_count, since)
+        return videos
+
     async def get_user_videos(
         self,
         username: str,
         max_count: int,
         since: datetime | None = None,
     ) -> list[Any]:
-        api = await self._create_api()
-        try:
-            videos = []
-            cutoff_time = (
-                self._comparable_datetime(since)
-                if since is not None
-                else (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
-            )
-            consecutive_old = 0
-            async for video in api.user(username=username).videos(count=max_count):
-                create_time = self.video_create_time(video)
-                if cutoff_time and create_time:
-                    if create_time <= cutoff_time:
-                        if self.video_is_pinned(video):
-                            continue
-
-                        consecutive_old += 1
-                        if consecutive_old >= self.MAX_CONSECUTIVE_OLD_USER_VIDEOS:
-                            break
-                        continue
-
-                consecutive_old = 0
-
-                videos.append(video)
-                if len(videos) >= max_count:
-                    break
-            return videos
-        finally:
-            await api.close_sessions()
-
-    async def get_user_follower_count(self, username: str) -> int | None:
-        api = await self._create_api()
-        try:
-            info = await api.user(username=username).info()
-        finally:
-            await api.close_sessions()
-
-        stats = info.get("userInfo", {}).get("stats", {})
-        follower_count = stats.get("followerCount")
-        return int(follower_count) if follower_count is not None else None
+        profile_url = f"https://www.tiktok.com/@{username.lstrip('@')}"
+        return await self.get_user_videos_by_url(profile_url, max_count, since)
 
     async def get_hashtag_videos(self, hashtag_name: str, max_count: int) -> list[Any]:
         api = await self._create_api()

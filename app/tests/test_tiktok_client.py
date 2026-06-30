@@ -105,110 +105,164 @@ def _hashtag_video(video_id, created_at, stats=None, stats_key="stats"):
     return _source_video(video_id, created_at, stats, stats_key)
 
 
-@pytest.mark.asyncio
-async def test_get_user_videos_stops_after_five_consecutive_old_videos():
-    now = datetime(2026, 1, 2, 12, 0, 0)
-    videos = [
-        SimpleNamespace(id="1", create_time=now - timedelta(hours=1)),
-        SimpleNamespace(id="2", create_time=now - timedelta(hours=23, minutes=59)),
-        SimpleNamespace(id="3", create_time=now - timedelta(hours=25)),
-        SimpleNamespace(id="4", create_time=now - timedelta(hours=26)),
-        SimpleNamespace(id="5", create_time=now - timedelta(hours=27)),
-        SimpleNamespace(id="6", create_time=now - timedelta(hours=28)),
-        SimpleNamespace(id="7", create_time=now - timedelta(hours=29)),
-        SimpleNamespace(id="8", create_time=now - timedelta(minutes=30)),
-    ]
-    api = _FakeApi(videos)
-    client = TikTokClient(db=None)
+def _install_fake_youtube_dl(monkeypatch, entries, calls):
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            self.opts = opts
+            calls.append(("init", opts))
 
-    async def fake_create_api():
-        return api
+        def __enter__(self):
+            return self
 
-    client._create_api = fake_create_api
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
-    recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=now - timedelta(hours=24))
+        def extract_info(self, url, download=False):
+            calls.append(("extract_info", url, download))
+            return {"entries": entries}
 
-    assert [video.id for video in recent_videos] == ["1", "2"]
-    assert api.closed is True
+    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL))
 
 
 @pytest.mark.asyncio
-async def test_get_user_videos_skips_old_pinned_videos_before_recent_videos():
+async def test_get_user_videos_uses_yt_dlp_profile_feed_and_options(monkeypatch):
     now = datetime(2026, 1, 2, 12, 0, 0)
-    videos = [
-        SimpleNamespace(
-            id="pinned-old-1",
-            create_time=now - timedelta(days=30),
-            as_dict={"isPinnedPost": True},
-        ),
-        SimpleNamespace(
-            id="pinned-old-2",
-            create_time=now - timedelta(days=10),
-            as_dict={"isPinned": True},
-        ),
-        SimpleNamespace(id="recent-1", create_time=now - timedelta(hours=1)),
-        SimpleNamespace(id="recent-2", create_time=now - timedelta(hours=2)),
-        SimpleNamespace(id="old-1", create_time=now - timedelta(hours=25)),
-        SimpleNamespace(id="old-2", create_time=now - timedelta(hours=26)),
-        SimpleNamespace(id="old-3", create_time=now - timedelta(hours=27)),
-        SimpleNamespace(id="old-4", create_time=now - timedelta(hours=28)),
-        SimpleNamespace(id="old-5", create_time=now - timedelta(hours=29)),
-        SimpleNamespace(id="recent-after-stop", create_time=now - timedelta(minutes=30)),
+    entries = [
+        {
+            "id": "1",
+            "timestamp": _timestamp(now - timedelta(hours=1)),
+            "webpage_url": "https://www.tiktok.com/@vtv24news/video/1",
+            "description": "Tin moi #news",
+            "uploader": "vtv24news",
+            "duration": 30,
+            "thumbnail": "https://example.com/cover.jpg",
+            "view_count": "100",
+            "like_count": "10",
+            "comment_count": "2",
+            "repost_count": 0,
+            "share_count": "3",
+            "save_count": "4",
+        },
     ]
-    api = _FakeApi(videos)
+    calls = []
+    _install_fake_youtube_dl(monkeypatch, entries, calls)
     client = TikTokClient(db=None)
 
-    async def fake_create_api():
-        return api
-
-    client._create_api = fake_create_api
-
-    recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=now - timedelta(hours=24))
-
-    assert [video.id for video in recent_videos] == ["recent-1", "recent-2"]
-
-
-@pytest.mark.asyncio
-async def test_get_user_videos_uses_create_time_from_as_dict_when_attribute_is_missing():
-    now = datetime(2026, 1, 2, 12, 0, 0)
-
-    videos = [
-        SimpleNamespace(id="1", as_dict={"createTime": _timestamp(now - timedelta(hours=1))}),
-        SimpleNamespace(id="2", as_dict={"createTime": _timestamp(now - timedelta(hours=25))}),
-        SimpleNamespace(id="3", as_dict={"createTime": _timestamp(now - timedelta(hours=26))}),
-        SimpleNamespace(id="4", as_dict={"createTime": _timestamp(now - timedelta(hours=27))}),
-        SimpleNamespace(id="5", as_dict={"createTime": _timestamp(now - timedelta(hours=28))}),
-        SimpleNamespace(id="6", as_dict={"createTime": _timestamp(now - timedelta(hours=29))}),
-    ]
-    api = _FakeApi(videos)
-    client = TikTokClient(db=None)
-
-    async def fake_create_api():
-        return api
-
-    client._create_api = fake_create_api
-
-    recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=now - timedelta(hours=24))
+    recent_videos = await client.get_user_videos("@vtv24news", max_count=10, since=now - timedelta(hours=24))
+    video = recent_videos[0]
 
     assert [video.id for video in recent_videos] == ["1"]
+    assert calls[0][0] == "init"
+    assert calls[0][1]["playlistend"] == 10
+    assert calls[0][1]["skip_download"] is True
+    assert calls[0][1]["ignoreerrors"] is True
+    assert calls[1] == ("extract_info", "https://www.tiktok.com/@vtv24news", False)
+    assert video.as_dict["id"] == "1"
+    assert video.as_dict["webVideoUrl"] == "https://www.tiktok.com/@vtv24news/video/1"
+    assert video.as_dict["desc"] == "Tin moi #news"
+    assert video.as_dict["createTime"] == _timestamp(now - timedelta(hours=1))
+    assert video.as_dict["author"] == {"uniqueId": "vtv24news"}
+    assert video.as_dict["video"]["duration"] == 30
+    assert video.as_dict["video"]["cover"] == "https://example.com/cover.jpg"
+    assert video.as_dict["statsV2"]["playCount"] == "100"
+    assert video.as_dict["statsV2"]["diggCount"] == "10"
+    assert video.as_dict["statsV2"]["commentCount"] == "2"
+    assert video.as_dict["statsV2"]["shareCount"] == 0
+    assert video.as_dict["statsV2"]["collectCount"] == "4"
 
 
 @pytest.mark.asyncio
-async def test_get_user_videos_excludes_videos_at_since_boundary():
+async def test_get_user_profile_videos_returns_identifier_from_uploader(monkeypatch):
     now = datetime(2026, 1, 2, 12, 0, 0)
-    cutoff = now - timedelta(hours=2)
-    videos = [
-        SimpleNamespace(id="new", create_time=cutoff + timedelta(minutes=1)),
-        SimpleNamespace(id="at-cutoff", create_time=cutoff),
-        SimpleNamespace(id="old", create_time=cutoff - timedelta(minutes=1)),
+    entries = [
+        {
+            "id": "1",
+            "timestamp": _timestamp(now - timedelta(hours=1)),
+            "uploader": "vtv24news",
+        },
     ]
-    api = _FakeApi(videos)
+    calls = []
+    _install_fake_youtube_dl(monkeypatch, entries, calls)
     client = TikTokClient(db=None)
 
-    async def fake_create_api():
-        return api
+    identifier, videos = await client.get_user_profile_videos(
+        "https://www.tiktok.com/@vtv24news",
+        max_count=10,
+        since=now - timedelta(hours=24),
+    )
 
-    client._create_api = fake_create_api
+    assert identifier == "vtv24news"
+    assert [video.id for video in videos] == ["1"]
+    assert calls[1] == ("extract_info", "https://www.tiktok.com/@vtv24news", False)
+
+
+@pytest.mark.asyncio
+async def test_get_user_profile_videos_keeps_identifier_when_videos_are_older_than_cutoff(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    entries = [
+        {
+            "id": "old",
+            "timestamp": _timestamp(now - timedelta(days=3)),
+            "uploader": "vtv24news",
+        },
+    ]
+    _install_fake_youtube_dl(monkeypatch, entries, [])
+    client = TikTokClient(db=None)
+
+    identifier, videos = await client.get_user_profile_videos(
+        "https://www.tiktok.com/@vtv24news",
+        max_count=10,
+        since=now - timedelta(days=1),
+    )
+
+    assert identifier == "vtv24news"
+    assert videos == []
+
+
+@pytest.mark.asyncio
+async def test_get_user_videos_stops_when_entry_reaches_since_boundary(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    cutoff = now - timedelta(hours=2)
+    entries = [
+        {"id": "new", "timestamp": _timestamp(cutoff + timedelta(minutes=1))},
+        {"id": "at-cutoff", "timestamp": _timestamp(cutoff)},
+        {"id": "ignored-after-cutoff", "timestamp": _timestamp(now - timedelta(minutes=30))},
+    ]
+    _install_fake_youtube_dl(monkeypatch, entries, [])
+    client = TikTokClient(db=None)
+
+    recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=cutoff)
+
+    assert [video.id for video in recent_videos] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_get_user_videos_skips_entries_without_timestamp(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    entries = [
+        {"id": "missing"},
+        None,
+        {"id": "recent", "timestamp": _timestamp(now - timedelta(hours=1))},
+    ]
+    _install_fake_youtube_dl(monkeypatch, entries, [])
+    client = TikTokClient(db=None)
+
+    recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=now - timedelta(hours=24))
+
+    assert [video.id for video in recent_videos] == ["recent"]
+
+
+@pytest.mark.asyncio
+async def test_get_user_videos_excludes_videos_at_since_boundary(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    cutoff = now - timedelta(hours=2)
+    entries = [
+        {"id": "new", "timestamp": _timestamp(cutoff + timedelta(minutes=1))},
+        {"id": "at-cutoff", "timestamp": _timestamp(cutoff)},
+        {"id": "old", "timestamp": _timestamp(cutoff - timedelta(minutes=1))},
+    ]
+    _install_fake_youtube_dl(monkeypatch, entries, [])
+    client = TikTokClient(db=None)
 
     recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=cutoff)
 

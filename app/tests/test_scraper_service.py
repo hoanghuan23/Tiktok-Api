@@ -65,6 +65,29 @@ def test_crawl_user_source_only_requests_videos_since_last_24_hours(monkeypatch)
     assert before_cutoff <= since <= after_cutoff
 
 
+def test_crawl_user_source_uses_max_days_old_for_cutoff(monkeypatch):
+    calls = []
+
+    async def fake_get_user_videos(self, username, max_count, since=None):
+        calls.append((username, max_count, since))
+        return []
+
+    monkeypatch.setattr(TikTokClient, "get_user_videos", fake_get_user_videos)
+    db = _session()
+    source = Source(source_type="user", identifier="vtv24news", max_days_old=2, is_active=True)
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    before_cutoff = scraper_service._now() - timedelta(days=2)
+    job = asyncio.run(crawl_source(db, source, max_count=30))
+    after_cutoff = scraper_service._now() - timedelta(days=2)
+
+    assert job.status == "done"
+    _, _, since = calls[0]
+    assert before_cutoff <= since <= after_cutoff
+
+
 def test_crawl_user_source_uses_latest_posted_at_when_it_is_newer_than_24h(monkeypatch):
     calls = []
 
@@ -289,7 +312,7 @@ def test_crawl_source_creates_initial_post_metric_from_video_stats(monkeypatch):
     assert metric.job_id == job.id
     assert post.last_metric_update == metric.recorded_at
     assert post.metric_tier == "medium"
-    assert post.next_metric_update == metric.recorded_at + timedelta(seconds=200)
+    assert post.next_metric_update == scraper_service.next_metric_update_at(metric.recorded_at)
 
 
 def test_crawl_source_creates_hashtags_for_new_posts(monkeypatch):
