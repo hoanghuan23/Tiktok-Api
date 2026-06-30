@@ -256,7 +256,7 @@ def test_update_post_metric_writes_task_log_summary(monkeypatch):
 
     assert job.status == "done"
     assert post.metric_tier == "very_low"
-    assert post.next_metric_update == metric_service.next_metric_update_at(post.last_metric_update)
+    assert post.next_metric_update == post.last_metric_update + timedelta(hours=12)
     assert task_log.task_name == "update_metrics"
     assert task_log.status == "done"
     assert task_log.items_processed == 1
@@ -376,7 +376,8 @@ def test_update_source_metrics_bulk_updates_due_posts(monkeypatch):
     for post in posts:
         db.refresh(post)
         assert post.last_metric_update == now
-        assert post.next_metric_update == metric_service.next_metric_update_at(now)
+        assert post.metric_tier == "very_low"
+        assert post.next_metric_update == now + timedelta(hours=12)
     task_log = db.query(TaskLog).one()
     assert task_log.items_processed == 3
 

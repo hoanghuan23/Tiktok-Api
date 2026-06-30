@@ -324,7 +324,7 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
         db.add(metric)
         post.last_metric_update = recorded_at
         post.metric_tier = metric_tier_from_metric(metric)
-        post.next_metric_update = next_metric_update_at(recorded_at)
+        post.next_metric_update = next_metric_update_at(recorded_at, post.metric_tier)
         job.items_updated = 1
         job.status = "done"
         job.finished_at = recorded_at
@@ -424,7 +424,7 @@ async def update_source_metrics(
         db.add(metric)
         post.last_metric_update = recorded_at
         post.metric_tier = metric_tier_from_metric(metric)
-        post.next_metric_update = next_metric_update_at(recorded_at)
+        post.next_metric_update = next_metric_update_at(recorded_at, post.metric_tier)
 
     job.items_updated = len(results) - len(failed_results)
     job.items_failed = skipped_old + len(failed_results)

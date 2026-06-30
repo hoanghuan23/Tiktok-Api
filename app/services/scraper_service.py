@@ -256,7 +256,7 @@ def _complete_crawl_job(
             db.add(metric)
             post.last_metric_update = recorded_at
             post.metric_tier = metric_tier_from_metric(metric)
-            post.next_metric_update = next_metric_update_at(recorded_at)
+            post.next_metric_update = next_metric_update_at(recorded_at, post.metric_tier)
         posts_new += 1
 
     job.posts_found = items_total

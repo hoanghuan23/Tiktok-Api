@@ -335,7 +335,7 @@ def test_crawl_source_creates_initial_post_metric_from_video_stats(monkeypatch):
     assert metric.job_id == job.id
     assert post.last_metric_update == metric.recorded_at
     assert post.metric_tier == "medium"
-    assert post.next_metric_update == scraper_service.next_metric_update_at(metric.recorded_at)
+    assert post.next_metric_update == metric.recorded_at + timedelta(hours=1)
 
 
 def test_crawl_source_creates_hashtags_for_new_posts(monkeypatch):

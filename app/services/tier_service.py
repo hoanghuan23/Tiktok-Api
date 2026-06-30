@@ -13,6 +13,15 @@ POST_TIER_THRESHOLDS = (
     (1_000, "low"),
 )
 
+METRIC_UPDATE_INTERVAL_MINUTES = {
+    "bootstrap": 5,
+    "viral": 15,
+    "high": 30,
+    "medium": 60,
+    "low": 180,
+    "very_low": 720,
+}
+
 SOURCE_TIER_THRESHOLDS = (
     (85, 5),
     (65, 4),
@@ -100,9 +109,12 @@ def metric_tier_from_metric(metric: PostMetric) -> str:
     return calculate_post_metric_tier(score)
 
 
-def next_metric_update_at(recorded_at: datetime) -> datetime:
-    settings = get_settings()
-    return recorded_at + timedelta(seconds=settings.scheduler_interval_seconds)
+def next_metric_update_at(recorded_at: datetime, metric_tier: str) -> datetime:
+    minutes = METRIC_UPDATE_INTERVAL_MINUTES.get(
+        metric_tier,
+        METRIC_UPDATE_INTERVAL_MINUTES["medium"],
+    )
+    return recorded_at + timedelta(minutes=minutes)
 
 
 def calculate_source_score(cache_rows: list[AnalyticsCache]) -> float:

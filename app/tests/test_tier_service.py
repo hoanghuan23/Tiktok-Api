@@ -11,6 +11,7 @@ from app.services.tier_service import (
     calculate_post_metric_tier,
     calculate_source_schedule_tier,
     calculate_source_score,
+    next_metric_update_at,
     refresh_source_schedule,
     upsert_source_analytics_cache,
 )
@@ -30,6 +31,18 @@ def test_calculate_post_metric_score_and_tier_thresholds():
     assert calculate_post_metric_tier(8_000) == "medium"
     assert calculate_post_metric_tier(1_000) == "low"
     assert calculate_post_metric_tier(999.99) == "very_low"
+
+
+def test_next_metric_update_at_uses_metric_tier_intervals():
+    recorded_at = datetime(2026, 1, 2, 12, 0, 0)
+
+    assert next_metric_update_at(recorded_at, "bootstrap") == recorded_at + timedelta(minutes=5)
+    assert next_metric_update_at(recorded_at, "viral") == recorded_at + timedelta(minutes=15)
+    assert next_metric_update_at(recorded_at, "high") == recorded_at + timedelta(minutes=30)
+    assert next_metric_update_at(recorded_at, "medium") == recorded_at + timedelta(minutes=60)
+    assert next_metric_update_at(recorded_at, "low") == recorded_at + timedelta(minutes=180)
+    assert next_metric_update_at(recorded_at, "very_low") == recorded_at + timedelta(minutes=720)
+    assert next_metric_update_at(recorded_at, "unknown") == recorded_at + timedelta(minutes=60)
 
 
 def test_calculate_source_score_handles_empty_and_zero_views():
