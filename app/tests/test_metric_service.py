@@ -132,6 +132,9 @@ def test_metric_retry_policy_retries_waf_network_and_transient_http_errors():
     assert not metric_service._should_retry_metric_result(
         {"ok": False, "error": "HTTP 404", "status_code": 404}
     )
+    assert not metric_service._should_retry_metric_result(
+        {"ok": False, "error": "Your IP address is blocked from accessing this post", "is_deleted": True}
+    )
 
 
 def test_extract_tiktok_video_metrics_uses_yt_dlp_counts(monkeypatch):
@@ -194,6 +197,30 @@ def test_extract_tiktok_video_metrics_falls_back_to_share_count(monkeypatch):
     metrics = metric_service.extract_tiktok_video_metrics("https://www.tiktok.com/@u/video/1")
 
     assert metrics["shares_count"] == 5
+
+
+def test_extract_tiktok_video_metrics_raises_deleted_error(monkeypatch):
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            raise Exception("[TikTok] 123: Your IP address is blocked from accessing this post")
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+
+    try:
+        metric_service.extract_tiktok_video_metrics("https://www.tiktok.com/@u/video/123")
+    except metric_service.DeletedTikTokVideoError as exc:
+        assert "blocked from accessing this post" in str(exc)
+    else:
+        raise AssertionError("Expected deleted TikTok video error")
 
 
 def test_update_post_metric_writes_task_log_summary(monkeypatch):
@@ -272,6 +299,45 @@ def test_update_post_metric_skips_posts_older_than_24h(monkeypatch):
     assert len(post.metrics) == 0
     assert task_log.task_name == "update_metrics"
     assert task_log.items_processed == 0
+
+
+def test_update_post_metric_marks_deleted_video_untracked(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+
+    def fake_extract_tiktok_video_metrics(url, timeout=None):
+        raise metric_service.DeletedTikTokVideoError(
+            "[TikTok] video-1: Your IP address is blocked from accessing this post"
+        )
+
+    monkeypatch.setattr(metric_service, "_now", lambda: now)
+    monkeypatch.setattr(metric_service, "extract_tiktok_video_metrics", fake_extract_tiktok_video_metrics)
+    db = _session()
+    source = Source(source_type="user", identifier="vtv24news", is_active=True)
+    db.add(source)
+    db.flush()
+    post = Post(
+        source_id=source.id,
+        tiktok_video_id="video-1",
+        tiktok_url="https://www.tiktok.com/@vtv24news/video/video-1",
+        posted_at=now - timedelta(hours=1),
+        is_tracked=True,
+        is_deleted=False,
+        next_metric_update=now,
+    )
+    db.add(post)
+    db.commit()
+    db.refresh(post)
+
+    job = asyncio.run(update_post_metric(db, post))
+
+    assert job.status == "done"
+    assert job.items_updated == 1
+    assert job.items_failed == 0
+    assert post.is_tracked is False
+    assert post.is_deleted is True
+    assert post.next_metric_update is None
+    assert db.query(PostMetric).count() == 0
+    assert db.query(PipelineLog).count() == 0
 
 
 def test_update_source_metrics_bulk_updates_due_posts(monkeypatch):
@@ -356,6 +422,53 @@ def test_update_source_metrics_records_failed_posts(monkeypatch):
     assert "HTTP 403" in job.error_message
     db.refresh(posts[1])
     assert posts[1].last_metric_update is None
+
+
+def test_update_source_metrics_marks_deleted_posts_untracked(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    monkeypatch.setattr(metric_service, "_now", lambda: now)
+    db = _session()
+    _active_tiktok_session(db)
+    source, posts = _source_with_posts(db, now, count=2)
+    posts[1].next_metric_update = now
+    db.commit()
+
+    async def fake_fetch_metric_results(posts_arg, session_record):
+        return [
+            {
+                "post_id": posts_arg[0].id,
+                "url": posts_arg[0].tiktok_url,
+                "ok": True,
+                "metrics": {
+                    "views_count": 100,
+                    "likes_count": 10,
+                    "comments_count": 1,
+                    "shares_count": 2,
+                    "bookmarks_count": 3,
+                },
+            },
+            {
+                "post_id": posts_arg[1].id,
+                "url": posts_arg[1].tiktok_url,
+                "ok": False,
+                "is_deleted": True,
+                "error": "Your IP address is blocked from accessing this post",
+            },
+        ]
+
+    monkeypatch.setattr(metric_service, "_fetch_metric_results", fake_fetch_metric_results)
+
+    job = asyncio.run(update_source_metrics(db, source))
+
+    assert job.status == "done"
+    assert job.items_updated == 2
+    assert job.items_failed == 0
+    assert db.query(PostMetric).count() == 1
+    assert db.query(PipelineLog).count() == 0
+    db.refresh(posts[1])
+    assert posts[1].is_tracked is False
+    assert posts[1].is_deleted is True
+    assert posts[1].next_metric_update is None
 
 
 def test_update_source_metrics_with_no_due_posts_does_not_fetch(monkeypatch):

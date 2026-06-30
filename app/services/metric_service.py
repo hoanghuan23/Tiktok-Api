@@ -17,6 +17,11 @@ from app.services.tiktok_client import TikTokClient
 
 logger = logging.getLogger("tiktok_api.metrics")
 
+
+class DeletedTikTokVideoError(Exception):
+    """Raised when TikTok/yt-dlp reports that a video is no longer accessible."""
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -66,10 +71,29 @@ def _is_post_older_than_24h(post: Post, now: datetime) -> bool:
 def _is_retryable_metric_error(error: str | None) -> bool:
     if not error:
         return False
+    if _is_deleted_metric_error(error):
+        return False
     error = error.lower()
     return any(
         marker in error
         for marker in ("captcha=true", "waf=true", "timeout", "connection", "403", "forbidden")
+    )
+
+
+def _is_deleted_metric_error(error: str | None) -> bool:
+    if not error:
+        return False
+    error = error.lower()
+    return any(
+        marker in error
+        for marker in (
+            "blocked from accessing this post",
+            "couldn't find this post",
+            "could not find this post",
+            "video is currently unavailable",
+            "this video is unavailable",
+            "post is unavailable",
+        )
     )
 
 
@@ -124,6 +148,15 @@ async def _fetch_one_metric(
             "ok": True,
             "metrics": metrics,
         }
+    except DeletedTikTokVideoError as exc:
+        return {
+            "post_id": post.id,
+            "url": post.tiktok_url,
+            "worker": worker_id,
+            "ok": False,
+            "is_deleted": True,
+            "error": str(exc),
+        }
     except Exception as exc:
         return {
             "post_id": post.id,
@@ -152,6 +185,9 @@ def extract_tiktok_video_metrics(video_url: str, timeout: int | None = None) -> 
         with YoutubeDL(ydl_opts) as ydl:
             item = ydl.extract_info(video_url, download=False)
     except Exception as exc:
+        if _is_deleted_metric_error(str(exc)):
+            logger.info("TikTok video khong con truy cap duoc | url=%s error=%s", video_url, exc)
+            raise DeletedTikTokVideoError(str(exc)) from exc
         logger.warning("yt-dlp khong lay duoc metric | url=%s error=%s", video_url, exc)
         return None
 
@@ -208,7 +244,7 @@ async def _metric_worker(
 
 async def _fetch_metric_results(
     posts: list[Post],
-    session_record: TikTokSession,
+    session_record: TikTokSession | None,
 ) -> list[dict[str, Any]]:
     settings = get_settings()
     queue: asyncio.Queue[Post] = asyncio.Queue()
@@ -294,6 +330,15 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
         job.finished_at = recorded_at
         add_task_log(db, job)
         db.commit()
+    except DeletedTikTokVideoError:
+        post.is_tracked = False
+        post.is_deleted = True
+        post.next_metric_update = None
+        job.items_updated = 1
+        job.status = "done"
+        job.finished_at = _now()
+        add_task_log(db, job)
+        db.commit()
     except Exception as exc:
         job.status = "failed"
         job.items_failed = 1
@@ -367,6 +412,11 @@ async def update_source_metrics(
         if post is None:
             continue
         if not result["ok"]:
+            if result.get("is_deleted"):
+                post.is_tracked = False
+                post.is_deleted = True
+                post.next_metric_update = None
+                continue
             failed_results.append(result)
             continue
 
