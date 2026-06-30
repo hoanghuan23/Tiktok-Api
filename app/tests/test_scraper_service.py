@@ -88,6 +88,29 @@ def test_crawl_user_source_uses_max_days_old_for_cutoff(monkeypatch):
     assert before_cutoff <= since <= after_cutoff
 
 
+def test_crawl_user_source_treats_zero_max_days_old_as_24_hours(monkeypatch):
+    calls = []
+
+    async def fake_get_user_videos(self, username, max_count, since=None):
+        calls.append((username, max_count, since))
+        return []
+
+    monkeypatch.setattr(TikTokClient, "get_user_videos", fake_get_user_videos)
+    db = _session()
+    source = Source(source_type="user", identifier="vtv24news", max_days_old=0, is_active=True)
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    before_cutoff = scraper_service._now() - timedelta(hours=24)
+    job = asyncio.run(crawl_source(db, source, max_count=30))
+    after_cutoff = scraper_service._now() - timedelta(hours=24)
+
+    assert job.status == "done"
+    _, _, since = calls[0]
+    assert before_cutoff <= since <= after_cutoff
+
+
 def test_crawl_user_source_uses_latest_posted_at_when_it_is_newer_than_24h(monkeypatch):
     calls = []
 

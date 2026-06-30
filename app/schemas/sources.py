@@ -12,10 +12,11 @@ SourceType = Literal["user", "hashtag", "sound", "keyword"]
 class SourceBase(ORMBase):
     source_type: SourceType
     display_name: str | None = None
-    max_days_old: int | None = Field(default=None, ge=0)
+    max_days_old: int | None = Field(default=None, ge=1)
 
 
 class SourceCreate(SourceBase):
+    max_days_old: int = Field(default=1, ge=1)
     identifier: str | None = Field(default=None, min_length=1, max_length=100)
     tiktok_url: str | None = Field(default=None, min_length=1, max_length=255)
     include_comments: bool = False
@@ -35,7 +36,7 @@ class SourceUpdate(ORMBase):
     is_active: bool | None = None
     display_name: str | None = None
     include_comments: bool | None = None
-    max_days_old: int | None = Field(default=None, ge=0)
+    max_days_old: int | None = Field(default=None, ge=1)
     schedule_override_minutes: int | None = None
     is_accessible: bool | None = None
 

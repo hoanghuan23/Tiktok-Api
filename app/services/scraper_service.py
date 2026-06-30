@@ -20,7 +20,7 @@ def _now() -> datetime:
 
 def _user_video_cutoff(source: Source | None = None) -> datetime:
     max_days_old = source.max_days_old if source and source.max_days_old is not None else 1
-    return _now() - timedelta(days=max(max_days_old, 0))
+    return _now() - timedelta(days=max(max_days_old, 1))
 
 
 def _user_video_since(db: Session, source: Source, latest_posted_at: datetime | None = None) -> datetime:

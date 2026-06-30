@@ -39,8 +39,7 @@ async def create_source(payload: SourceCreate, db: Session = Depends(get_db)) ->
     # TODO: DB chua co cot include_comments, tam thoi chi nhan request field nay.
     videos = []
     if payload.source_type == "user":
-        max_days_old = payload.max_days_old if payload.max_days_old is not None else 1
-        since = _now() - timedelta(days=max(max_days_old, 0))
+        since = _now() - timedelta(days=max(payload.max_days_old, 1))
         try:
             identifier, videos = await TikTokClient(db).get_user_profile_videos(
                 payload.tiktok_url.strip(),

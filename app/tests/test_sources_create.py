@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import sys
 
 import pytest
+from pydantic import ValidationError
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -94,6 +95,15 @@ def test_create_user_source_uses_tiktok_url_uploader_and_bootstrap_posts(monkeyp
     assert metric.likes_count == 100
     assert job.status == "done"
     assert job.posts_new == 1
+
+
+def test_create_source_rejects_zero_max_days_old():
+    with pytest.raises(ValidationError):
+        SourceCreate(
+            source_type="user",
+            tiktok_url="https://www.tiktok.com/@vtv24news",
+            max_days_old=0,
+        )
 
 
 def test_create_user_source_rejects_missing_yt_dlp_uploader(monkeypatch):
