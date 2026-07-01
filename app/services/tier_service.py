@@ -36,16 +36,16 @@ ROLLING_WINDOW_DAYS = {
 }
 
 BASE_INTERVAL_MINUTES = {
-    "hashtag": 30,
-    "keyword": 35,
-    "user": 60,
+    "hashtag": 45,
+    "keyword": 60,
+    "user": 90,
 }
 
 TIER_MULTIPLIER = {
-    5: 0.5,
-    4: 0.75,
-    3: 1,
-    2: 2,
+    5: 0.75,
+    4: 1,
+    3: 1.5,
+    2: 2.5,
     1: 4,
 }
 
