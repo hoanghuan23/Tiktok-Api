@@ -16,6 +16,7 @@ from app.services.tiktok_client import TikTokClient
 
 
 logger = logging.getLogger("tiktok_api.metrics")
+METRIC_SCAN_MISS_THRESHOLD = 2
 
 
 class DeletedTikTokVideoError(Exception):
@@ -106,6 +107,21 @@ def _should_retry_metric_result(result: dict[str, Any]) -> bool:
         _is_retryable_metric_error(result.get("error"))
         or result.get("status_code") in {403, 408, 429, 500, 502, 503, 504}
     )
+
+
+def _record_metric_scan_failure(post: Post) -> bool:
+    post.metric_scan_miss_count = (post.metric_scan_miss_count or 0) + 1
+    return post.metric_scan_miss_count >= METRIC_SCAN_MISS_THRESHOLD
+
+
+def _reset_metric_scan_miss(post: Post) -> None:
+    post.metric_scan_miss_count = 0
+
+
+def _mark_post_metric_unavailable(post: Post) -> None:
+    post.is_tracked = False
+    post.is_deleted = True
+    post.next_metric_update = None
 
 
 def due_posts_for_source(db: Session, source_id: int, now: datetime) -> list[Post]:
@@ -322,6 +338,7 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
             job_id=job.id,
         )
         db.add(metric)
+        _reset_metric_scan_miss(post)
         post.last_metric_update = recorded_at
         post.metric_tier = metric_tier_from_metric(metric)
         post.next_metric_update = next_metric_update_at(recorded_at, post.metric_tier)
@@ -330,16 +347,19 @@ async def update_post_metric(db: Session, post: Post) -> PipelineJob:
         job.finished_at = recorded_at
         add_task_log(db, job)
         db.commit()
-    except DeletedTikTokVideoError:
-        post.is_tracked = False
-        post.is_deleted = True
-        post.next_metric_update = None
-        job.items_updated = 1
-        job.status = "done"
+    except DeletedTikTokVideoError as exc:
+        if _record_metric_scan_failure(post):
+            _mark_post_metric_unavailable(post)
+        job.status = "failed"
+        job.items_failed = 1
+        job.error_message = str(exc)
         job.finished_at = _now()
+        add_job_log(db, job, "Update metric that bai", "ERROR", type(exc).__name__, str(exc))
         add_task_log(db, job)
         db.commit()
     except Exception as exc:
+        if _record_metric_scan_failure(post):
+            _mark_post_metric_unavailable(post)
         job.status = "failed"
         job.items_failed = 1
         job.error_message = str(exc)
@@ -405,6 +425,7 @@ async def update_source_metrics(
     results = await _fetch_metric_results(active_posts, session_record)
     posts_by_id = {post.id: post for post in active_posts}
     recorded_at = _now()
+    successful_results = 0
     failed_results = []
 
     for result in results:
@@ -412,21 +433,20 @@ async def update_source_metrics(
         if post is None:
             continue
         if not result["ok"]:
-            if result.get("is_deleted"):
-                post.is_tracked = False
-                post.is_deleted = True
-                post.next_metric_update = None
-                continue
+            if _record_metric_scan_failure(post):
+                _mark_post_metric_unavailable(post)
             failed_results.append(result)
             continue
 
         metric = _metric_from_result(post, result, recorded_at, job.id)
         db.add(metric)
+        successful_results += 1
+        _reset_metric_scan_miss(post)
         post.last_metric_update = recorded_at
         post.metric_tier = metric_tier_from_metric(metric)
         post.next_metric_update = next_metric_update_at(recorded_at, post.metric_tier)
 
-    job.items_updated = len(results) - len(failed_results)
+    job.items_updated = successful_results
     job.items_failed = skipped_old + len(failed_results)
     job.status = "done" if job.items_updated > 0 or job.items_failed < job.items_total else "failed"
     if failed_results:
