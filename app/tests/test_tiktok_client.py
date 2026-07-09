@@ -156,6 +156,8 @@ async def test_get_user_videos_uses_yt_dlp_profile_feed_and_options(monkeypatch)
     assert calls[0][1]["playlistend"] == 10
     assert calls[0][1]["skip_download"] is True
     assert calls[0][1]["ignoreerrors"] is True
+    assert calls[0][1]["sleep_interval_requests"] == 2
+    assert calls[0][1]["extractor_retries"] == 3
     assert calls[1] == ("extract_info", "https://www.tiktok.com/@vtv24news", False)
     assert video.as_dict["id"] == "1"
     assert video.as_dict["webVideoUrl"] == "https://www.tiktok.com/@vtv24news/video/1"

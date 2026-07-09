@@ -77,7 +77,17 @@ def _is_retryable_metric_error(error: str | None) -> bool:
     error = error.lower()
     return any(
         marker in error
-        for marker in ("captcha=true", "waf=true", "timeout", "connection", "403", "forbidden")
+        for marker in (
+            "captcha=true",
+            "waf=true",
+            "timeout",
+            "connection",
+            "403",
+            "429",
+            "forbidden",
+            "too many requests",
+            "no video formats found",
+        )
     )
 
 
@@ -186,14 +196,13 @@ async def _fetch_one_metric(
 def extract_tiktok_video_metrics(video_url: str, timeout: int | None = None) -> dict[str, Any] | None:
     from yt_dlp import YoutubeDL
 
-    ydl_opts = {
-        "quiet": True,
-        "skip_download": True,
-        "extract_flat": False,
-        "ignoreerrors": False,
-        "noplaylist": True,
-        "no_warnings": True,
-    }
+    ydl_opts = TikTokClient._yt_dlp_options(max_count=1)
+    ydl_opts.update(
+        {
+            "ignoreerrors": False,
+            "noplaylist": True,
+        }
+    )
     if timeout is not None:
         ydl_opts["socket_timeout"] = timeout
 
@@ -204,6 +213,9 @@ def extract_tiktok_video_metrics(video_url: str, timeout: int | None = None) -> 
         if _is_deleted_metric_error(str(exc)):
             logger.info("TikTok video khong con truy cap duoc | url=%s error=%s", video_url, exc)
             raise DeletedTikTokVideoError(str(exc)) from exc
+        if _is_retryable_metric_error(str(exc)):
+            logger.warning("yt-dlp gap loi tam thoi khi lay metric | url=%s error=%s", video_url, exc)
+            raise
         logger.warning("yt-dlp khong lay duoc metric | url=%s error=%s", video_url, exc)
         return None
 

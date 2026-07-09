@@ -155,7 +155,8 @@ class TikTokClient:
 
     @staticmethod
     def _yt_dlp_options(max_count: int) -> dict[str, Any]:
-        return {
+        settings = get_settings()
+        options: dict[str, Any] = {
             "quiet": True,
             "skip_download": True,
             "extract_flat": False,
@@ -164,6 +165,15 @@ class TikTokClient:
             "noplaylist": False,
             "no_warnings": True,
         }
+        if settings.ytdlp_request_delay_seconds > 0:
+            options["sleep_interval_requests"] = settings.ytdlp_request_delay_seconds
+        if settings.ytdlp_extractor_retries > 0:
+            options["extractor_retries"] = settings.ytdlp_extractor_retries
+        if settings.ytdlp_proxy_url:
+            options["proxy"] = settings.ytdlp_proxy_url
+        if settings.ytdlp_cookie_file:
+            options["cookiefile"] = settings.ytdlp_cookie_file
+        return options
 
     @staticmethod
     def _yt_dlp_identifier(entries: list[dict[str, Any] | None]) -> str | None:

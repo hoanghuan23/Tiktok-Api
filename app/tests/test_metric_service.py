@@ -129,6 +129,12 @@ def test_metric_retry_policy_retries_waf_network_and_transient_http_errors():
     assert metric_service._should_retry_metric_result(
         {"ok": False, "error": "TikTok returned Forbidden"}
     )
+    assert metric_service._should_retry_metric_result(
+        {"ok": False, "error": "HTTP Error 429: Too Many Requests"}
+    )
+    assert metric_service._should_retry_metric_result(
+        {"ok": False, "error": "No video formats found"}
+    )
     assert not metric_service._should_retry_metric_result(
         {"ok": False, "error": "HTTP 404", "status_code": 404}
     )
