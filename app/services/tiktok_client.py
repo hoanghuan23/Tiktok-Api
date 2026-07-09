@@ -161,7 +161,7 @@ class TikTokClient:
             "skip_download": True,
             "extract_flat": False,
             "playlistend": max_count,
-            "ignoreerrors": True,
+            "ignoreerrors": False,
             "noplaylist": False,
             "no_warnings": True,
         }

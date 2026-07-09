@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     scheduler_interval_seconds: int = 60
     scheduler_source_batch_size: int = 15
     scheduler_post_batch_size: int = 30
+    scheduler_num_workers: int = 3
     metric_num_workers: int = 1
     metric_max_retries: int = 3
     metric_retry_delay_seconds: int = 30

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -67,6 +68,55 @@ def expire_old_tracked_posts(db: Session, now: datetime) -> int:
     return expired_count
 
 
+def _run_source_job_in_thread(source_id: int, max_count: int) -> int | None:
+    db = SessionLocal()
+    try:
+        source = db.get(Source, source_id)
+        if source is None:
+            logger.warning("Bo qua scrape source khong ton tai | source_id=%s", source_id)
+            return None
+        job = asyncio.run(crawl_source(db, source, max_count=max_count))
+        return job.id
+    finally:
+        db.close()
+
+
+def _run_metric_job_in_thread(source_id: int, post_ids: list[int], now: datetime) -> int | None:
+    db = SessionLocal()
+    try:
+        source = db.get(Source, source_id)
+        if source is None:
+            logger.warning("Bo qua cap nhat metrics vi source khong ton tai | source_id=%s", source_id)
+            return None
+
+        posts = db.query(Post).filter(Post.id.in_(post_ids)).all()
+        posts_by_id = {post.id: post for post in posts}
+        ordered_posts = [posts_by_id[post_id] for post_id in post_ids if post_id in posts_by_id]
+        if not ordered_posts:
+            logger.warning("Bo qua cap nhat metrics vi khong con post nao | source_id=%s", source_id)
+            return None
+
+        job = asyncio.run(update_source_metrics(db, source, posts=ordered_posts, now=now))
+        return job.id
+    finally:
+        db.close()
+
+
+def _job_ids_from_results(results: list[Any], job_type: str) -> list[int]:
+    job_ids = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(
+                "Scheduler worker that bai | job_type=%s",
+                job_type,
+                exc_info=(type(result), result, result.__traceback__),
+            )
+            continue
+        if result is not None:
+            job_ids.append(result)
+    return job_ids
+
+
 async def run_scheduler_cycle(
     db: Session,
     now: datetime | None = None,
@@ -80,26 +130,42 @@ async def run_scheduler_cycle(
     post_batch_size = post_limit if post_limit is not None else settings.scheduler_post_batch_size
     posts_expired = expire_old_tracked_posts(db, current_time)
 
-    source_jobs = []
     due_source_batch = due_sources(db, current_time, source_batch_size)
+    source_ids = [source.id for source in due_source_batch]
     if due_source_batch:
         logger.info("Scheduler bat dau scrape bai moi | sources_due=%s", len(due_source_batch))
-    for source in due_source_batch:
-        job = await crawl_source(db, source, max_count=max_count)
-        source_jobs.append(job.id)
 
-    post_jobs = []
-    posts_by_source: dict[int, list[Post]] = defaultdict(list)
+    posts_by_source: dict[int, list[int]] = defaultdict(list)
     due_post_batch = due_posts(db, current_time, post_batch_size)
     for post in due_post_batch:
-        posts_by_source[post.source_id].append(post)
+        posts_by_source[post.source_id].append(post.id)
 
-    for source_id, posts in posts_by_source.items():
-        source = db.get(Source, source_id)
-        if source is None:
-            continue
-        job = await update_source_metrics(db, source, posts=posts, now=current_time)
-        post_jobs.append(job.id)
+    worker_count = max(1, settings.scheduler_num_workers)
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        source_results = await asyncio.gather(
+            *[
+                loop.run_in_executor(executor, _run_source_job_in_thread, source_id, max_count)
+                for source_id in source_ids
+            ],
+            return_exceptions=True,
+        )
+        post_results = await asyncio.gather(
+            *[
+                loop.run_in_executor(
+                    executor,
+                    _run_metric_job_in_thread,
+                    source_id,
+                    post_ids,
+                    current_time,
+                )
+                for source_id, post_ids in posts_by_source.items()
+            ],
+            return_exceptions=True,
+        )
+
+    source_jobs = _job_ids_from_results(source_results, "source")
+    post_jobs = _job_ids_from_results(post_results, "metric")
 
     if source_jobs or post_jobs or posts_expired:
         logger.info(

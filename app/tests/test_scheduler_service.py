@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -15,6 +17,23 @@ def _session():
     models.Base.metadata.create_all(bind=engine)
     session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     return session_local()
+
+
+def _file_session_factory(tmp_path):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'scheduler.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    models.Base.metadata.create_all(bind=engine)
+    return sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def _settings(workers=3):
+    return SimpleNamespace(
+        scheduler_source_batch_size=15,
+        scheduler_post_batch_size=30,
+        scheduler_num_workers=workers,
+    )
 
 
 def test_due_sources_includes_null_next_scrape_and_limits_batch():
@@ -179,19 +198,17 @@ def test_run_scheduler_cycle_processes_due_source_and_post_batches(monkeypatch):
     db.commit()
     calls = {"sources": [], "posts": []}
 
-    async def fake_crawl_source(db_arg, source_arg, max_count=10):
-        calls["sources"].append((source_arg.id, max_count))
-        source_arg.next_scrape = now + timedelta(minutes=30)
-        return SimpleNamespace(id=101)
+    def fake_source_job(source_id, max_count=10):
+        calls["sources"].append((source_id, max_count))
+        return 101
 
-    async def fake_update_source_metrics(db_arg, source_arg, posts=None, now=None):
-        calls["posts"].append((source_arg.id, [post.id for post in posts], now))
-        for post in posts:
-            post.next_metric_update = now + timedelta(seconds=200)
-        return SimpleNamespace(id=202)
+    def fake_metric_job(source_id, post_ids, current_time):
+        calls["posts"].append((source_id, post_ids, current_time))
+        return 202
 
-    monkeypatch.setattr(scheduler_service, "crawl_source", fake_crawl_source)
-    monkeypatch.setattr(scheduler_service, "update_source_metrics", fake_update_source_metrics)
+    monkeypatch.setattr(scheduler_service, "get_settings", lambda: _settings())
+    monkeypatch.setattr(scheduler_service, "_run_source_job_in_thread", fake_source_job)
+    monkeypatch.setattr(scheduler_service, "_run_metric_job_in_thread", fake_metric_job)
 
     result = asyncio.run(
         scheduler_service.run_scheduler_cycle(db, now=now, source_limit=20, post_limit=50)
@@ -248,11 +265,12 @@ def test_run_scheduler_cycle_groups_due_posts_by_source(monkeypatch):
     db.commit()
     calls = []
 
-    async def fake_update_source_metrics(db_arg, source_arg, posts=None, now=None):
-        calls.append((source_arg.id, [post.tiktok_video_id for post in posts]))
-        return SimpleNamespace(id=200 + len(calls))
+    def fake_metric_job(source_id, post_ids, current_time):
+        calls.append((source_id, post_ids, current_time))
+        return 200 + source_id
 
-    monkeypatch.setattr(scheduler_service, "update_source_metrics", fake_update_source_metrics)
+    monkeypatch.setattr(scheduler_service, "get_settings", lambda: _settings())
+    monkeypatch.setattr(scheduler_service, "_run_metric_job_in_thread", fake_metric_job)
 
     result = asyncio.run(
         scheduler_service.run_scheduler_cycle(db, now=now, source_limit=0, post_limit=50)
@@ -260,5 +278,134 @@ def test_run_scheduler_cycle_groups_due_posts_by_source(monkeypatch):
 
     assert result["posts_processed"] == 3
     assert result["post_job_ids"] == [201, 202]
-    assert calls == [(source_a.id, ["a-1", "a-2"]), (source_b.id, ["b-1"])]
+    assert sorted(calls) == [
+        (source_a.id, [posts[0].id, posts[1].id], now),
+        (source_b.id, [posts[2].id], now),
+    ]
+    db.close()
+
+
+def test_run_source_job_in_thread_uses_own_session(monkeypatch, tmp_path):
+    session_local = _file_session_factory(tmp_path)
+    db = session_local()
+    source = Source(source_type="keyword", identifier="news", is_active=True, is_accessible=True)
+    db.add(source)
+    db.commit()
+    source_id = source.id
+    db.close()
+    calls = []
+
+    async def fake_crawl_source(db_arg, source_arg, max_count=10):
+        calls.append((source_arg.id, source_arg.identifier, max_count))
+        return SimpleNamespace(id=301)
+
+    monkeypatch.setattr(scheduler_service, "SessionLocal", session_local)
+    monkeypatch.setattr(scheduler_service, "crawl_source", fake_crawl_source)
+
+    assert scheduler_service._run_source_job_in_thread(source_id, 25) == 301
+    assert calls == [(source_id, "news", 25)]
+
+
+def test_run_metric_job_in_thread_uses_own_session_and_preserves_post_order(monkeypatch, tmp_path):
+    session_local = _file_session_factory(tmp_path)
+    db = session_local()
+    source = Source(source_type="user", identifier="author", is_active=True, is_accessible=True)
+    db.add(source)
+    db.flush()
+    first = Post(
+        source_id=source.id,
+        tiktok_video_id="first",
+        tiktok_url="https://www.tiktok.com/@author/video/first",
+        posted_at=datetime(2026, 1, 2, 12, 0, 0),
+        is_tracked=True,
+        is_deleted=False,
+    )
+    second = Post(
+        source_id=source.id,
+        tiktok_video_id="second",
+        tiktok_url="https://www.tiktok.com/@author/video/second",
+        posted_at=datetime(2026, 1, 2, 12, 0, 0),
+        is_tracked=True,
+        is_deleted=False,
+    )
+    db.add_all([first, second])
+    db.commit()
+    source_id = source.id
+    post_ids = [second.id, first.id]
+    db.close()
+    now = datetime(2026, 1, 2, 12, 30, 0)
+    calls = []
+
+    async def fake_update_source_metrics(db_arg, source_arg, posts=None, now=None):
+        calls.append((source_arg.id, [post.tiktok_video_id for post in posts], now))
+        return SimpleNamespace(id=302)
+
+    monkeypatch.setattr(scheduler_service, "SessionLocal", session_local)
+    monkeypatch.setattr(scheduler_service, "update_source_metrics", fake_update_source_metrics)
+
+    assert scheduler_service._run_metric_job_in_thread(source_id, post_ids, now) == 302
+    assert calls == [(source_id, ["second", "first"], now)]
+
+
+def test_run_scheduler_cycle_continues_when_worker_fails(monkeypatch):
+    db = _session()
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    source_a = Source(source_type="keyword", identifier="a", is_active=True, is_accessible=True)
+    source_b = Source(source_type="keyword", identifier="b", is_active=True, is_accessible=True)
+    db.add_all([source_a, source_b])
+    db.commit()
+
+    def fake_source_job(source_id, max_count=10):
+        if source_id == source_a.id:
+            raise RuntimeError("boom")
+        return 400 + source_id
+
+    monkeypatch.setattr(scheduler_service, "get_settings", lambda: _settings())
+    monkeypatch.setattr(scheduler_service, "_run_source_job_in_thread", fake_source_job)
+
+    result = asyncio.run(
+        scheduler_service.run_scheduler_cycle(db, now=now, source_limit=20, post_limit=0)
+    )
+
+    assert result["sources_processed"] == 1
+    assert result["source_job_ids"] == [400 + source_b.id]
+    db.close()
+
+
+def test_run_scheduler_cycle_limits_scheduler_workers(monkeypatch):
+    db = _session()
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    for index in range(5):
+        db.add(
+            Source(
+                source_type="keyword",
+                identifier=f"source-{index}",
+                is_active=True,
+                is_accessible=True,
+            )
+        )
+    db.commit()
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_source_job(source_id, max_count=10):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return source_id
+
+    monkeypatch.setattr(scheduler_service, "get_settings", lambda: _settings(workers=2))
+    monkeypatch.setattr(scheduler_service, "_run_source_job_in_thread", fake_source_job)
+
+    result = asyncio.run(
+        scheduler_service.run_scheduler_cycle(db, now=now, source_limit=5, post_limit=0)
+    )
+
+    assert result["sources_processed"] == 5
+    assert max_active == 2
     db.close()
