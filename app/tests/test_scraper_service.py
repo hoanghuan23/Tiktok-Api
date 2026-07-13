@@ -295,6 +295,35 @@ def test_crawl_source_saves_posted_at_from_video_as_dict_create_time(monkeypatch
     assert post.tiktok_url == "https://www.tiktok.com/@vtv24news/video/video-1"
 
 
+def test_crawl_source_preserves_photo_web_video_url(monkeypatch):
+    photo_url = "https://www.tiktok.com/@marcusrashford/photo/7642329388519968014"
+    video = SimpleNamespace(
+        id="7642329388519968014",
+        as_dict={
+            "id": "7642329388519968014",
+            "webVideoUrl": photo_url,
+            "createTime": 1767351600,
+            "author": {"uniqueId": "marcusrashford"},
+        },
+    )
+
+    async def fake_get_user_videos(self, username, max_count, since=None):
+        return [video]
+
+    monkeypatch.setattr(TikTokClient, "get_user_videos", fake_get_user_videos)
+    db = _session()
+    source = Source(source_type="user", identifier="marcusrashford", is_active=True)
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    job = asyncio.run(crawl_source(db, source, max_count=30))
+    post = db.query(Post).filter(Post.tiktok_video_id == "7642329388519968014").one()
+
+    assert job.status == "done"
+    assert post.tiktok_url == photo_url
+
+
 def test_crawl_source_creates_initial_post_metric_from_video_stats(monkeypatch):
     video = SimpleNamespace(
         id="video-1",

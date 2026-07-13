@@ -12,6 +12,7 @@ from app.models import TikTokSession
 class TikTokClient:
     MAX_CONSECUTIVE_OLD_USER_VIDEOS = 5
     MAX_TOP_RECENT_VIDEOS = 15
+    NO_VIDEO_FORMATS_MARKER = "no video formats found"
 
     def __init__(self, db: Session):
         self.db = db
@@ -161,7 +162,7 @@ class TikTokClient:
             "skip_download": True,
             "extract_flat": False,
             "playlistend": max_count,
-            "ignoreerrors": False,
+            "ignoreerrors": True,
             "noplaylist": False,
             "no_warnings": True,
         }
@@ -174,6 +175,10 @@ class TikTokClient:
         if settings.ytdlp_cookie_file:
             options["cookiefile"] = settings.ytdlp_cookie_file
         return options
+
+    @classmethod
+    def _is_no_video_formats_error(cls, error: Exception) -> bool:
+        return cls.NO_VIDEO_FORMATS_MARKER in str(error).lower()
 
     @staticmethod
     def _yt_dlp_identifier(entries: list[dict[str, Any] | None]) -> str | None:
@@ -224,8 +229,13 @@ class TikTokClient:
     ) -> tuple[str | None, list[Any]]:
         from yt_dlp import YoutubeDL
 
-        with YoutubeDL(self._yt_dlp_options(max_count)) as ydl:
-            result = ydl.extract_info(profile_url, download=False) or {}
+        try:
+            with YoutubeDL(self._yt_dlp_options(max_count)) as ydl:
+                result = ydl.extract_info(profile_url, download=False) or {}
+        except Exception as exc:
+            if self._is_no_video_formats_error(exc):
+                return None, []
+            raise
 
         entries = result.get("entries") or []
         return (

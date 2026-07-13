@@ -4,6 +4,7 @@ import sys
 
 import pytest
 
+from app.core.config import get_settings
 from app.services.tiktok_client import TikTokClient
 
 
@@ -124,6 +125,25 @@ def _install_fake_youtube_dl(monkeypatch, entries, calls):
     monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL))
 
 
+def _install_raising_youtube_dl(monkeypatch, error, calls):
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            self.opts = opts
+            calls.append(("init", opts))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            calls.append(("extract_info", url, download))
+            raise error
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+
+
 @pytest.mark.asyncio
 async def test_get_user_videos_uses_yt_dlp_profile_feed_and_options(monkeypatch):
     now = datetime(2026, 1, 2, 12, 0, 0)
@@ -156,8 +176,8 @@ async def test_get_user_videos_uses_yt_dlp_profile_feed_and_options(monkeypatch)
     assert calls[0][1]["playlistend"] == 10
     assert calls[0][1]["skip_download"] is True
     assert calls[0][1]["ignoreerrors"] is True
-    assert calls[0][1]["sleep_interval_requests"] == 2
-    assert calls[0][1]["extractor_retries"] == 3
+    assert calls[0][1]["sleep_interval_requests"] == get_settings().ytdlp_request_delay_seconds
+    assert calls[0][1]["extractor_retries"] == get_settings().ytdlp_extractor_retries
     assert calls[1] == ("extract_info", "https://www.tiktok.com/@vtv24news", False)
     assert video.as_dict["id"] == "1"
     assert video.as_dict["webVideoUrl"] == "https://www.tiktok.com/@vtv24news/video/1"
@@ -252,6 +272,63 @@ async def test_get_user_videos_skips_entries_without_timestamp(monkeypatch):
     recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=now - timedelta(hours=24))
 
     assert [video.id for video in recent_videos] == ["recent"]
+
+
+@pytest.mark.asyncio
+async def test_get_user_videos_skips_failed_entries_between_valid_entries(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    entries = [
+        {"id": "first", "timestamp": _timestamp(now - timedelta(hours=1))},
+        None,
+        {"id": "second", "timestamp": _timestamp(now - timedelta(minutes=30))},
+    ]
+    _install_fake_youtube_dl(monkeypatch, entries, [])
+    client = TikTokClient(db=None)
+
+    recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=now - timedelta(hours=24))
+
+    assert [video.id for video in recent_videos] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_get_user_videos_keeps_photo_webpage_url(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    photo_url = "https://www.tiktok.com/@marcusrashford/photo/7642329388519968014"
+    entries = [
+        {
+            "id": "7642329388519968014",
+            "timestamp": _timestamp(now - timedelta(hours=1)),
+            "webpage_url": photo_url,
+            "uploader": "marcusrashford",
+        },
+    ]
+    _install_fake_youtube_dl(monkeypatch, entries, [])
+    client = TikTokClient(db=None)
+
+    recent_videos = await client.get_user_videos("marcusrashford", max_count=10, since=now - timedelta(hours=24))
+
+    assert [video.id for video in recent_videos] == ["7642329388519968014"]
+    assert recent_videos[0].as_dict["webVideoUrl"] == photo_url
+
+
+@pytest.mark.asyncio
+async def test_get_user_profile_videos_treats_no_video_formats_as_empty_feed(monkeypatch):
+    calls = []
+    _install_raising_youtube_dl(
+        monkeypatch,
+        Exception("[TikTok] 7642329388519968014: No video formats found!"),
+        calls,
+    )
+    client = TikTokClient(db=None)
+
+    identifier, videos = await client.get_user_profile_videos(
+        "https://www.tiktok.com/@marcusrashford",
+        max_count=10,
+    )
+
+    assert identifier is None
+    assert videos == []
+    assert calls[0][1]["ignoreerrors"] is True
 
 
 @pytest.mark.asyncio
