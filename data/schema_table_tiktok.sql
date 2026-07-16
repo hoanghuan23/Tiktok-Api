@@ -88,7 +88,6 @@ CREATE TABLE posts (
         last_metric_update DATETIME,
         metric_tier VARCHAR(20) NOT NULL DEFAULT 'bootstrap',
         next_metric_update DATETIME,
-        last_engagement_velocity FLOAT,
         cold_check_count INTEGER NOT NULL DEFAULT 0,
         metric_scan_miss_count INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (id),

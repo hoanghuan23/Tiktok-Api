@@ -20,7 +20,6 @@ class PostRead(ORMBase):
     last_metric_update: datetime | None = None
     metric_tier: str
     next_metric_update: datetime | None = None
-    last_engagement_velocity: float | None = None
     cold_check_count: int
     metric_scan_miss_count: int
 

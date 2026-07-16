@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -22,7 +22,6 @@ class Post(Base):
     last_metric_update = Column(DateTime)
     metric_tier = Column(String(20), nullable=False, default="bootstrap")
     next_metric_update = Column(DateTime)
-    last_engagement_velocity = Column(Float)
     cold_check_count = Column(Integer, nullable=False, default=0)
     metric_scan_miss_count = Column(Integer, nullable=False, default=0)
 
