@@ -5,6 +5,7 @@ import sys
 import pytest
 
 from app.core.config import get_settings
+from app.services import gallery_dl_tiktok
 from app.services.tiktok_client import TikTokClient
 
 
@@ -142,6 +143,21 @@ def _install_raising_youtube_dl(monkeypatch, error, calls):
             raise error
 
     monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+
+
+def test_should_fallback_to_gallery_dl_only_for_targeted_yt_dlp_errors():
+    assert TikTokClient._should_fallback_to_gallery_dl(
+        "Unexpected response from webpage request; please report this issue"
+    )
+    assert TikTokClient._should_fallback_to_gallery_dl(
+        "Unable to extract universal data for rehydration"
+    )
+    assert TikTokClient._should_fallback_to_gallery_dl("No video formats found!")
+    assert TikTokClient._should_fallback_to_gallery_dl(
+        "Unable to download webpage: HTTP Error 403: Forbidden"
+    )
+    assert TikTokClient._should_fallback_to_gallery_dl("Unable to extract secondary user ID")
+    assert not TikTokClient._should_fallback_to_gallery_dl("HTTP Error 429: Too Many Requests")
 
 
 @pytest.mark.asyncio
@@ -312,23 +328,134 @@ async def test_get_user_videos_keeps_photo_webpage_url(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_user_profile_videos_treats_no_video_formats_as_empty_feed(monkeypatch):
+async def test_get_user_profile_videos_falls_back_to_gallery_dl_for_targeted_yt_dlp_error(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
     calls = []
     _install_raising_youtube_dl(
         monkeypatch,
         Exception("[TikTok] 7642329388519968014: No video formats found!"),
         calls,
     )
+    gallery_calls = []
+
+    def fake_extract_tiktok_posts(url, max_count=None):
+        gallery_calls.append((url, max_count))
+        return [
+            {
+                "tiktok_video_id": "7642329388519968014",
+                "tiktok_url": "https://www.tiktok.com/@marcusrashford/video/7642329388519968014",
+                "description": "Original sound post",
+                "duration_seconds": None,
+                "cover_url": "https://example.com/cover.jpg",
+                "posted_at": now - timedelta(hours=1),
+                "author": "marcusrashford",
+                "metrics": {
+                    "likes_count": "10",
+                    "shares_count": "2",
+                    "comments_count": "1",
+                    "views_count": "100",
+                    "bookmarks_count": "3",
+                },
+            }
+        ]
+
+    monkeypatch.setattr(gallery_dl_tiktok, "extract_tiktok_posts", fake_extract_tiktok_posts)
     client = TikTokClient(db=None)
 
     identifier, videos = await client.get_user_profile_videos(
         "https://www.tiktok.com/@marcusrashford",
         max_count=10,
+        since=now - timedelta(hours=24),
     )
 
-    assert identifier is None
-    assert videos == []
+    assert identifier == "marcusrashford"
+    assert [video.id for video in videos] == ["7642329388519968014"]
+    assert videos[0].as_dict["desc"] == "Original sound post"
+    assert videos[0].as_dict["video"]["cover"] == "https://example.com/cover.jpg"
+    assert videos[0].as_dict["statsV2"]["playCount"] == "100"
     assert calls[0][1]["ignoreerrors"] is True
+    assert gallery_calls == [("https://www.tiktok.com/@marcusrashford", 10)]
+
+
+@pytest.mark.asyncio
+async def test_get_user_profile_videos_falls_back_when_yt_dlp_logs_403_with_empty_entries(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    calls = []
+
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            self.opts = opts
+            calls.append(("init", opts))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, download=False):
+            calls.append(("extract_info", url, download))
+            self.opts["logger"].error(
+                "[TikTok] 7662787768069737735: Unable to download webpage: "
+                "HTTP Error 403: Forbidden"
+            )
+            self.opts["logger"].error(
+                "[tiktok:user] shopeefood_vn: Unable to extract secondary user ID"
+            )
+            return {"entries": []}
+
+    gallery_calls = []
+
+    def fake_extract_tiktok_posts(url, max_count=None):
+        gallery_calls.append((url, max_count))
+        return [
+            {
+                "tiktok_video_id": "7662787768069737735",
+                "tiktok_url": "https://www.tiktok.com/@shopeefood_vn/video/7662787768069737735",
+                "description": "Original sound saved by gallery-dl",
+                "duration_seconds": None,
+                "cover_url": None,
+                "posted_at": now - timedelta(hours=1),
+                "author": "shopeefood_vn",
+                "metrics": {"views_count": 100},
+            }
+        ]
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+    monkeypatch.setattr(gallery_dl_tiktok, "extract_tiktok_posts", fake_extract_tiktok_posts)
+    client = TikTokClient(db=None)
+
+    identifier, videos = await client.get_user_profile_videos(
+        "https://www.tiktok.com/@shopeefood_vn",
+        max_count=10,
+        since=now - timedelta(hours=24),
+    )
+
+    assert identifier == "shopeefood_vn"
+    assert [video.id for video in videos] == ["7662787768069737735"]
+    assert videos[0].as_dict["desc"] == "Original sound saved by gallery-dl"
+    assert gallery_calls == [("https://www.tiktok.com/@shopeefood_vn", 10)]
+
+
+@pytest.mark.asyncio
+async def test_get_user_profile_videos_raises_combined_error_when_gallery_dl_fallback_fails(monkeypatch):
+    _install_raising_youtube_dl(
+        monkeypatch,
+        Exception("[TikTok] 1: Unable to extract universal data for rehydration"),
+        [],
+    )
+
+    def fake_extract_tiktok_posts(url, max_count=None):
+        raise gallery_dl_tiktok.GalleryDLTikTokError("gallery blocked")
+
+    monkeypatch.setattr(gallery_dl_tiktok, "extract_tiktok_posts", fake_extract_tiktok_posts)
+    client = TikTokClient(db=None)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.get_user_profile_videos("https://www.tiktok.com/@vtv24news", max_count=10)
+
+    assert "yt-dlp failed" in str(exc_info.value)
+    assert "gallery-dl failed: gallery blocked" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

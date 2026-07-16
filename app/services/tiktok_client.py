@@ -7,12 +7,20 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import TikTokSession
+from app.services import gallery_dl_tiktok
 
 
 class TikTokClient:
     MAX_CONSECUTIVE_OLD_USER_VIDEOS = 5
     MAX_TOP_RECENT_VIDEOS = 15
-    NO_VIDEO_FORMATS_MARKER = "no video formats found"
+    YT_DLP_GALLERY_FALLBACK_MARKERS = (
+        "unexpected response from webpage request",
+        "unable to extract universal data for rehydration",
+        "no video formats found",
+        "http error 403: forbidden",
+        "403: forbidden",
+        "unable to extract secondary user id",
+    )
 
     def __init__(self, db: Session):
         self.db = db
@@ -155,6 +163,62 @@ class TikTokClient:
         )
 
     @staticmethod
+    def _datetime_timestamp(value: datetime | None) -> int | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp())
+
+    @classmethod
+    def _normalize_gallery_dl_post(cls, item: dict[str, Any]) -> Any:
+        video_id = item.get("tiktok_video_id")
+        metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+        create_time = item.get("posted_at")
+        timestamp = cls._datetime_timestamp(create_time) if isinstance(create_time, datetime) else None
+        author = item.get("author")
+
+        return SimpleNamespace(
+            id=str(video_id) if video_id else None,
+            create_time=create_time if isinstance(create_time, datetime) else None,
+            as_dict={
+                "id": str(video_id) if video_id else None,
+                "webVideoUrl": item.get("tiktok_url"),
+                "desc": item.get("description"),
+                "createTime": timestamp,
+                "author": {"uniqueId": author} if author else None,
+                "video": {
+                    "duration": item.get("duration_seconds"),
+                    "cover": item.get("cover_url"),
+                    "originCover": item.get("cover_url"),
+                },
+                "statsV2": {
+                    "diggCount": metrics.get("likes_count"),
+                    "shareCount": metrics.get("shares_count"),
+                    "commentCount": metrics.get("comments_count"),
+                    "playCount": metrics.get("views_count"),
+                    "collectCount": metrics.get("bookmarks_count"),
+                },
+            },
+        )
+
+    class _YtDlpErrorCollector:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        def debug(self, msg: str) -> None:
+            return None
+
+        def warning(self, msg: str) -> None:
+            self.messages.append(str(msg))
+
+        def error(self, msg: str) -> None:
+            self.messages.append(str(msg))
+
+        def has_gallery_dl_fallback_error(self) -> bool:
+            return any(TikTokClient._should_fallback_to_gallery_dl(message) for message in self.messages)
+
+    @staticmethod
     def _yt_dlp_options(max_count: int) -> dict[str, Any]:
         settings = get_settings()
         options: dict[str, Any] = {
@@ -177,8 +241,16 @@ class TikTokClient:
         return options
 
     @classmethod
-    def _is_no_video_formats_error(cls, error: Exception) -> bool:
-        return cls.NO_VIDEO_FORMATS_MARKER in str(error).lower()
+    def _should_fallback_to_gallery_dl(cls, error: Exception | str) -> bool:
+        message = str(error).lower()
+        return any(marker in message for marker in cls.YT_DLP_GALLERY_FALLBACK_MARKERS)
+
+    @staticmethod
+    def _yt_dlp_entries(result: dict[str, Any]) -> list[dict[str, Any] | None]:
+        entries = result.get("entries")
+        if entries is None:
+            return []
+        return entries
 
     @staticmethod
     def _yt_dlp_identifier(entries: list[dict[str, Any] | None]) -> str | None:
@@ -221,6 +293,44 @@ class TikTokClient:
 
         return videos
 
+    @classmethod
+    def _normalize_gallery_dl_entries(
+        cls,
+        entries: list[dict[str, Any]],
+        max_count: int,
+        since: datetime | None = None,
+    ) -> list[Any]:
+        cutoff_time = (
+            cls._comparable_datetime(since)
+            if since is not None
+            else (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
+        )
+        videos = []
+        for item in entries:
+            create_time = item.get("posted_at")
+            if create_time is None:
+                continue
+            if isinstance(create_time, datetime):
+                create_time = cls._comparable_datetime(create_time)
+            else:
+                continue
+            if create_time <= cutoff_time:
+                break
+
+            videos.append(cls._normalize_gallery_dl_post(item))
+            if len(videos) >= max_count:
+                break
+
+        return videos
+
+    @staticmethod
+    def _gallery_dl_identifier(entries: list[dict[str, Any]]) -> str | None:
+        for item in entries:
+            author = item.get("author")
+            if author:
+                return str(author).lstrip("@")
+        return None
+
     async def get_user_profile_videos(
         self,
         profile_url: str,
@@ -229,15 +339,33 @@ class TikTokClient:
     ) -> tuple[str | None, list[Any]]:
         from yt_dlp import YoutubeDL
 
+        collector = self._YtDlpErrorCollector()
+        ydl_options = self._yt_dlp_options(max_count)
+        ydl_options["logger"] = collector
         try:
-            with YoutubeDL(self._yt_dlp_options(max_count)) as ydl:
+            with YoutubeDL(ydl_options) as ydl:
                 result = ydl.extract_info(profile_url, download=False) or {}
         except Exception as exc:
-            if self._is_no_video_formats_error(exc):
-                return None, []
+            if self._should_fallback_to_gallery_dl(exc):
+                try:
+                    posts = gallery_dl_tiktok.extract_tiktok_posts(profile_url, max_count=max_count)
+                except Exception as fallback_exc:
+                    raise RuntimeError(
+                        f"yt-dlp failed: {exc}; gallery-dl failed: {fallback_exc}"
+                    ) from fallback_exc
+                return (
+                    self._gallery_dl_identifier(posts),
+                    self._normalize_gallery_dl_entries(posts, max_count, since),
+                )
             raise
 
-        entries = result.get("entries") or []
+        entries = self._yt_dlp_entries(result)
+        if not entries and collector.has_gallery_dl_fallback_error():
+            posts = gallery_dl_tiktok.extract_tiktok_posts(profile_url, max_count=max_count)
+            return (
+                self._gallery_dl_identifier(posts),
+                self._normalize_gallery_dl_entries(posts, max_count, since),
+            )
         return (
             self._yt_dlp_identifier(entries),
             self._normalize_yt_dlp_entries(entries, max_count, since),

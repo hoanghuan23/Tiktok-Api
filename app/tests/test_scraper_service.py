@@ -324,6 +324,52 @@ def test_crawl_source_preserves_photo_web_video_url(monkeypatch):
     assert post.tiktok_url == photo_url
 
 
+def test_crawl_source_saves_gallery_dl_normalized_original_sound_post(monkeypatch):
+    posted_at = datetime(2026, 1, 2, 11, 0, 0)
+    gallery_video = TikTokClient._normalize_gallery_dl_post(
+        {
+            "tiktok_video_id": "7662816375626419469",
+            "tiktok_url": "https://www.tiktok.com/@temu/video/7662816375626419469",
+            "description": "Original sound post #deal",
+            "duration_seconds": None,
+            "cover_url": "https://example.com/original-sound-cover.jpg",
+            "posted_at": posted_at,
+            "author": "temu",
+            "metrics": {
+                "likes_count": 100,
+                "shares_count": 5,
+                "comments_count": 7,
+                "views_count": 1200,
+                "bookmarks_count": 9,
+            },
+        }
+    )
+
+    async def fake_get_user_videos(self, username, max_count, since=None):
+        return [gallery_video]
+
+    monkeypatch.setattr(TikTokClient, "get_user_videos", fake_get_user_videos)
+    db = _session()
+    source = Source(source_type="user", identifier="temu", is_active=True)
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    job = asyncio.run(crawl_source(db, source, max_count=30))
+    post = db.query(Post).filter(Post.tiktok_video_id == "7662816375626419469").one()
+    metric = db.query(PostMetric).filter(PostMetric.post_id == post.id).one()
+
+    assert job.status == "done"
+    assert post.tiktok_url == "https://www.tiktok.com/@temu/video/7662816375626419469"
+    assert post.description == "Original sound post #deal"
+    assert post.duration_seconds is None
+    assert post.cover_url == "https://example.com/original-sound-cover.jpg"
+    assert post.posted_at == posted_at
+    assert [hashtag.tag for hashtag in post.hashtags] == ["deal"]
+    assert metric.views_count == 1200
+    assert metric.likes_count == 100
+
+
 def test_crawl_source_creates_initial_post_metric_from_video_stats(monkeypatch):
     video = SimpleNamespace(
         id="video-1",

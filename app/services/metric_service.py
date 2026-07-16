@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import PipelineJob, Post, PostMetric, Source, TikTokSession
+from app.services import gallery_dl_tiktok
 from app.services.scraper_service import add_job_log, add_task_log
 from app.services.tier_service import metric_tier_from_metric, next_metric_update_at
 from app.services.tiktok_client import TikTokClient
@@ -87,6 +88,9 @@ def _is_retryable_metric_error(error: str | None) -> bool:
             "forbidden",
             "too many requests",
             "no video formats found",
+            "unexpected response from webpage request",
+            "unable to extract universal data for rehydration",
+            "unable to extract secondary user id",
         )
     )
 
@@ -213,6 +217,17 @@ def extract_tiktok_video_metrics(video_url: str, timeout: int | None = None) -> 
         if _is_deleted_metric_error(str(exc)):
             logger.info("TikTok video khong con truy cap duoc | url=%s error=%s", video_url, exc)
             raise DeletedTikTokVideoError(str(exc)) from exc
+        if TikTokClient._should_fallback_to_gallery_dl(exc):
+            logger.warning("yt-dlp loi TikTok extractor, thu gallery-dl | url=%s error=%s", video_url, exc)
+            try:
+                post = gallery_dl_tiktok.extract_tiktok_post(video_url)
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    f"yt-dlp failed: {exc}; gallery-dl failed: {fallback_exc}"
+                ) from fallback_exc
+            if not post or not isinstance(post.get("metrics"), dict):
+                raise ValueError(f"yt-dlp failed: {exc}; gallery-dl failed: khong lay duoc metric")
+            return post["metrics"]
         if _is_retryable_metric_error(str(exc)):
             logger.warning("yt-dlp gap loi tam thoi khi lay metric | url=%s error=%s", video_url, exc)
             raise
