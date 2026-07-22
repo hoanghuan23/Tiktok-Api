@@ -258,20 +258,42 @@ async def test_get_user_profile_videos_keeps_identifier_when_videos_are_older_th
 
 
 @pytest.mark.asyncio
-async def test_get_user_videos_stops_when_entry_reaches_since_boundary(monkeypatch):
+async def test_get_user_videos_skips_old_entry_before_recent_video(monkeypatch):
     now = datetime(2026, 1, 2, 12, 0, 0)
     cutoff = now - timedelta(hours=2)
     entries = [
         {"id": "new", "timestamp": _timestamp(cutoff + timedelta(minutes=1))},
         {"id": "at-cutoff", "timestamp": _timestamp(cutoff)},
-        {"id": "ignored-after-cutoff", "timestamp": _timestamp(now - timedelta(minutes=30))},
+        {"id": "recent-after-old", "timestamp": _timestamp(now - timedelta(minutes=30))},
     ]
     _install_fake_youtube_dl(monkeypatch, entries, [])
     client = TikTokClient(db=None)
 
     recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=cutoff)
 
-    assert [video.id for video in recent_videos] == ["new"]
+    assert [video.id for video in recent_videos] == ["new", "recent-after-old"]
+
+
+@pytest.mark.asyncio
+async def test_get_user_videos_stops_after_consecutive_old_entries(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    cutoff = now - timedelta(hours=2)
+    entries = [
+        {
+            "id": f"old-{index}",
+            "timestamp": _timestamp(cutoff - timedelta(minutes=index + 1)),
+        }
+        for index in range(TikTokClient.MAX_CONSECUTIVE_OLD_USER_VIDEOS)
+    ]
+    entries.append(
+        {"id": "not-reached", "timestamp": _timestamp(now - timedelta(minutes=30))}
+    )
+    _install_fake_youtube_dl(monkeypatch, entries, [])
+    client = TikTokClient(db=None)
+
+    recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=cutoff)
+
+    assert recent_videos == []
 
 
 @pytest.mark.asyncio
@@ -438,6 +460,38 @@ async def test_get_user_profile_videos_falls_back_when_yt_dlp_logs_403_with_empt
 
 
 @pytest.mark.asyncio
+async def test_get_user_profile_videos_falls_back_for_silent_empty_yt_dlp_result(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    _install_fake_youtube_dl(monkeypatch, [], [])
+    gallery_calls = []
+
+    def fake_extract_tiktok_posts(url, max_count=None):
+        gallery_calls.append((url, max_count))
+        return [
+            {
+                "tiktok_video_id": "recent",
+                "tiktok_url": "https://www.tiktok.com/@vtv24news/video/recent",
+                "posted_at": now - timedelta(hours=1),
+                "author": "vtv24news",
+                "metrics": {},
+            }
+        ]
+
+    monkeypatch.setattr(gallery_dl_tiktok, "extract_tiktok_posts", fake_extract_tiktok_posts)
+    client = TikTokClient(db=None)
+
+    identifier, videos = await client.get_user_profile_videos(
+        "https://www.tiktok.com/@vtv24news",
+        max_count=10,
+        since=now - timedelta(hours=24),
+    )
+
+    assert identifier == "vtv24news"
+    assert [video.id for video in videos] == ["recent"]
+    assert gallery_calls == [("https://www.tiktok.com/@vtv24news", 10)]
+
+
+@pytest.mark.asyncio
 async def test_get_user_profile_videos_raises_combined_error_when_gallery_dl_fallback_fails(monkeypatch):
     _install_raising_youtube_dl(
         monkeypatch,
@@ -473,6 +527,51 @@ async def test_get_user_videos_excludes_videos_at_since_boundary(monkeypatch):
     recent_videos = await client.get_user_videos("vtv24news", max_count=10, since=cutoff)
 
     assert [video.id for video in recent_videos] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_get_user_videos_uses_known_channel_id_when_available(monkeypatch):
+    client = TikTokClient(db=None)
+    calls = []
+
+    monkeypatch.setattr(client, "_get_user_channel_id", lambda username: "sec-uid-123")
+
+    async def fake_get_user_videos_by_url(profile_url, max_count, since=None):
+        calls.append((profile_url, max_count, since))
+        return [SimpleNamespace(id="new")]
+
+    monkeypatch.setattr(client, "get_user_videos_by_url", fake_get_user_videos_by_url)
+    since = datetime(2026, 1, 1, 12, 0, 0)
+
+    videos = await client.get_user_videos("@vtv24news", max_count=10, since=since)
+
+    assert [video.id for video in videos] == ["new"]
+    assert calls == [("tiktokuser:sec-uid-123", 10, since)]
+
+
+@pytest.mark.asyncio
+async def test_get_user_videos_falls_back_to_profile_when_channel_id_feed_fails(monkeypatch):
+    client = TikTokClient(db=None)
+    calls = []
+    client._USER_CHANNEL_IDS["fallback_user"] = "stale-sec-uid"
+    monkeypatch.setattr(client, "_get_user_channel_id", lambda username: "stale-sec-uid")
+
+    async def fake_get_user_videos_by_url(profile_url, max_count, since=None):
+        calls.append(profile_url)
+        if profile_url.startswith("tiktokuser:"):
+            raise RuntimeError("stale channel id")
+        return [SimpleNamespace(id="from-profile")]
+
+    monkeypatch.setattr(client, "get_user_videos_by_url", fake_get_user_videos_by_url)
+
+    videos = await client.get_user_videos("fallback_user", max_count=10)
+
+    assert [video.id for video in videos] == ["from-profile"]
+    assert calls == [
+        "tiktokuser:stale-sec-uid",
+        "https://www.tiktok.com/@fallback_user",
+    ]
+    assert "fallback_user" not in client._USER_CHANNEL_IDS
 
 
 @pytest.mark.asyncio

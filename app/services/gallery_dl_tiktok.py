@@ -182,9 +182,11 @@ def extract_tiktok_posts(url: str, max_count: int | None = None) -> list[dict[st
     job = gdl_job.DataJob(url, file=None)
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            job.run()
+            status = job.run()
     except Exception as exc:
         raise GalleryDLTikTokError(str(exc)) from exc
+    if status:
+        raise GalleryDLTikTokError(f"gallery-dl ket thuc voi status={status}")
 
     posts: list[dict[str, Any]] = []
     for _msg_type, *rest in job.data:

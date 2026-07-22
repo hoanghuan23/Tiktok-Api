@@ -6,13 +6,14 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models import TikTokSession
+from app.models import Post, Source, TikTokSession
 from app.services import gallery_dl_tiktok
 
 
 class TikTokClient:
     MAX_CONSECUTIVE_OLD_USER_VIDEOS = 5
     MAX_TOP_RECENT_VIDEOS = 15
+    _USER_CHANNEL_IDS: dict[str, str] = {}
     YT_DLP_GALLERY_FALLBACK_MARKERS = (
         "unexpected response from webpage request",
         "unable to extract universal data for rehydration",
@@ -41,6 +42,51 @@ class TikTokClient:
         if self.settings.ms_token:
             return self.settings.ms_token
         return None
+
+    def _known_user_video_url(self, username: str) -> str | None:
+        if self.db is None:
+            return None
+
+        normalized_username = username.lstrip("@")
+        return (
+            self.db.query(Post.tiktok_url)
+            .join(Source, Post.source_id == Source.id)
+            .filter(
+                Source.source_type == "user",
+                Source.identifier.in_((normalized_username, f"@{normalized_username}")),
+                Post.tiktok_url.is_not(None),
+            )
+            .order_by(Post.posted_at.desc())
+            .limit(1)
+            .scalar()
+        )
+
+    def _get_user_channel_id(self, username: str) -> str | None:
+        """Resolve TikTok's secUid from a known video when profile pages are blocked."""
+        normalized_username = username.lstrip("@").lower()
+        cached = self._USER_CHANNEL_IDS.get(normalized_username)
+        if cached:
+            return cached
+
+        video_url = self._known_user_video_url(username)
+        if not video_url:
+            return None
+
+        from yt_dlp import YoutubeDL
+
+        collector = self._YtDlpErrorCollector()
+        options = self._yt_dlp_options(1)
+        options["logger"] = collector
+        with YoutubeDL(options) as ydl:
+            result = ydl.extract_info(video_url, download=False) or {}
+
+        channel_id = result.get("channel_id")
+        if not channel_id:
+            return None
+
+        channel_id = str(channel_id)
+        self._USER_CHANNEL_IDS[normalized_username] = channel_id
+        return channel_id
 
     async def _create_api(self) -> Any:
         from TikTokApi import TikTokApi
@@ -275,6 +321,7 @@ class TikTokClient:
             else (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
         )
         videos = []
+        consecutive_old_videos = 0
         for item in entries:
             if not item:
                 continue
@@ -285,8 +332,14 @@ class TikTokClient:
 
             create_time = datetime.fromtimestamp(float(timestamp), timezone.utc).replace(tzinfo=None)
             if create_time <= cutoff_time:
-                break
+                # TikTok can put old pinned posts before the chronological feed.
+                # Do not let one such post hide newer posts that follow it.
+                consecutive_old_videos += 1
+                if consecutive_old_videos >= cls.MAX_CONSECUTIVE_OLD_USER_VIDEOS:
+                    break
+                continue
 
+            consecutive_old_videos = 0
             videos.append(cls._normalize_yt_dlp_video(item))
             if len(videos) >= max_count:
                 break
@@ -306,6 +359,7 @@ class TikTokClient:
             else (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
         )
         videos = []
+        consecutive_old_videos = 0
         for item in entries:
             create_time = item.get("posted_at")
             if create_time is None:
@@ -315,8 +369,13 @@ class TikTokClient:
             else:
                 continue
             if create_time <= cutoff_time:
-                break
+                # Profile extractors may emit pinned posts before recent posts.
+                consecutive_old_videos += 1
+                if consecutive_old_videos >= cls.MAX_CONSECUTIVE_OLD_USER_VIDEOS:
+                    break
+                continue
 
+            consecutive_old_videos = 0
             videos.append(cls._normalize_gallery_dl_post(item))
             if len(videos) >= max_count:
                 break
@@ -360,7 +419,7 @@ class TikTokClient:
             raise
 
         entries = self._yt_dlp_entries(result)
-        if not entries and collector.has_gallery_dl_fallback_error():
+        if not entries:
             posts = gallery_dl_tiktok.extract_tiktok_posts(profile_url, max_count=max_count)
             return (
                 self._gallery_dl_identifier(posts),
@@ -386,6 +445,19 @@ class TikTokClient:
         max_count: int,
         since: datetime | None = None,
     ) -> list[Any]:
+        channel_id = self._get_user_channel_id(username)
+        if channel_id:
+            try:
+                # The profile webpage frequently hides the secondary user ID from
+                # bots. yt-dlp can query the post feed directly when secUid is known.
+                return await self.get_user_videos_by_url(
+                    f"tiktokuser:{channel_id}", max_count, since
+                )
+            except Exception:
+                # Keep the normal profile URL and gallery-dl fallback available if
+                # a previously cached channel ID becomes invalid.
+                self._USER_CHANNEL_IDS.pop(username.lstrip("@").lower(), None)
+
         profile_url = f"https://www.tiktok.com/@{username.lstrip('@')}"
         return await self.get_user_videos_by_url(profile_url, max_count, since)
 

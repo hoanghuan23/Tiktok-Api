@@ -122,7 +122,7 @@ async def run_scheduler_cycle(
     now: datetime | None = None,
     source_limit: int | None = None,
     post_limit: int | None = None,
-    max_count: int = 10,
+    max_count: int = 30,
 ) -> dict[str, Any]:
     settings = get_settings()
     current_time = now or _now()

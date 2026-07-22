@@ -15,7 +15,7 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 @router.post("/sources/{source_id}/crawl", response_model=PipelineJobRead)
 async def crawl_source_job(
     source_id: int,
-    max_count: int = Query(default=10, ge=1, le=200),
+    max_count: int = Query(default=30, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> PipelineJob:
     source = db.get(Source, source_id)

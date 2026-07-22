@@ -221,7 +221,7 @@ def test_run_scheduler_cycle_processes_due_source_and_post_batches(monkeypatch):
         "source_job_ids": [101],
         "post_job_ids": [202],
     }
-    assert calls == {"sources": [(source.id, 10)], "posts": [(source.id, [post.id], now)]}
+    assert calls == {"sources": [(source.id, 30)], "posts": [(source.id, [post.id], now)]}
     db.close()
 
 
